@@ -1429,9 +1429,7 @@ static void complete_deactivation(struct fp_img_dev *dev)
 	/* TODO Change at least to SLEEP_MODE ? */
 
 	pdata->deactivating = FALSE;
-	/*pdata->state = STATE_DEINIT;*/
 	fpi_imgdev_deactivate_complete(dev);
-
 }
 
 /* Transforms the raw data to fprint data and submit it to fprint. */
@@ -1603,7 +1601,7 @@ goback:
 			if (process_frame_empty(transfer->buffer, 1)) {
 				/* Finger leaves, send final image. */
 				transform_to_fpi(dev);
-				complete_deactivation(dev);
+				pdata->state = STATE_DEACTIVATING;
 				break;
 			}
 			/* Merge new frame with current image. */
@@ -1612,7 +1610,7 @@ goback:
 				fp_warn("STATE_CAPTURING_ANS: Buffer is full %p %p (%p)",pdata->braw_cur,pdata->braw_end,(pdata->braw_cur + FRAME_SIZE) );
 				/* Buffer is full, send final image. */
 				transform_to_fpi(dev);
-				complete_deactivation(dev);
+				pdata->state = STATE_DEACTIVATING;
 				break;
 			}
 			/* Ask new frame. */
@@ -1685,14 +1683,12 @@ MODE_FULL_FRAME:
 			fp_dbg("STATE_CAPTURING_FULL_ANS: %s (size %d)", dbg_data, transfer->actual_length);
 			memcpy(pdata->braw, transfer->buffer, transfer->actual_length);
 			transform_to_fpi(dev);
-			complete_deactivation(dev);
-			/* TODO set STATE_DEACTIVATING? */
-			break;
+			/* Continue to deactivate device */
+			pdata->state = STATE_DEACTIVATING;
 
 		case STATE_DEACTIVATING:
 			fp_dbg("STATE_DEACTIVATING:");
-			/* TODO test if using this state is ok */
-			complete_deactivation(dev);
+			/* TODO change sensor to sleep mode but not complete deactivation */
 			break;
 
 		default:
@@ -1705,7 +1701,9 @@ MODE_FULL_FRAME:
 
 	return;
 err:
+	pdata->state = STATE_DEACTIVATING;
 	fp_err("Error occured in async process");
+	fpi_imgdev_session_error(dev, -EIO);
 	return;
 }
 
@@ -1782,10 +1780,12 @@ static int dev_activate(struct fp_img_dev *dev, enum fp_imgdev_state state)
 
 static void dev_deactivate(struct fp_img_dev *dev)
 {
-	/* FIXME add checking of deactivating in async process. */
 	struct etes603_data *pdata = dev->priv;
-	pdata->deactivating = TRUE;
-	/* complete_deactivation is called asynchronously. */
+	/* complete_deactivation can be called asynchronously. */
+	if (pdata->state != STATE_DEACTIVATING)
+		pdata->deactivating = TRUE;
+	else
+		complete_deactivation(dev);
 }
 
 static int dev_init(struct fp_img_dev *dev, unsigned long driver_data)
