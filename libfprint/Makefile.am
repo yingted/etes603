@@ -30,7 +30,8 @@ EXTRA_DIST = \
 	$(ETES603_SRC)		\
 	aeslib.c aeslib.h	\
 	imagemagick.c		\
-	gdkpixbuf.c
+	gdkpixbuf.c		\
+	60-fprint-autosuspend.rules
 
 DRIVER_SRC =
 OTHER_SRC =
@@ -82,8 +83,10 @@ fprint_list_udev_rules_LDADD = $(builddir)/libfprint.la
 
 udev_rules_DATA = 60-fprint-autosuspend.rules
 
+if ENABLE_UDEV_RULES
 $(udev_rules_DATA): fprint-list-udev-rules
 	$(builddir)/fprint-list-udev-rules > $@
+endif
 
 if ENABLE_UPEKE2
 DRIVER_SRC += $(UPEKE2_SRC)

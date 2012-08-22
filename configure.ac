@@ -135,7 +135,26 @@ AC_SUBST(GLIB_LIBS)
 imagemagick_found=no
 gdkpixbuf_found=no
 
-AC_SUBST([udev_rulesdir], [$($PKG_CONFIG --variable=udevdir udev)/rules.d])
+AC_ARG_ENABLE(udev-rules,
+	AC_HELP_STRING([--enable-udev-rules],[Update the udev rules]),
+	[case "${enableval}" in
+	yes) ENABLE_UDEV_RULES=yes ;;
+	no) ENABLE_UDEV_RULES=no ;;
+	*) AC_MSG_ERROR(bad value ${enableval} for --enable-udev-rules) ;;
+	esac],
+	[ENABLE_UDEV_RULES=yes]) dnl Default value
+AM_CONDITIONAL(ENABLE_UDEV_RULES, test x$ENABLE_UDEV_RULES = "xyes")
+
+AC_ARG_WITH(udev-rules-dir,
+	    AS_HELP_STRING([--with-udev-rules-dir=DIR],[Installation path for udev rules @<:@auto@:>@]),
+	    [ac_with_udev_rules_dir=$withval],
+	    [ac_with_udev_rules_dir=""])
+
+if test "${ac_with_udev_rules_dir}" = ""; then
+	ac_with_udev_rules_dir=`$PKG_CONFIG --variable=udevdir udev`/rules.d
+fi
+AC_MSG_NOTICE([installing udev rules in ${ac_with_udev_rules_dir}])
+AC_SUBST([udev_rulesdir],[${ac_with_udev_rules_dir}])
 
 if test "$require_imaging" = "yes"; then
 	PKG_CHECK_MODULES(IMAGING, gthread-2.0 gdk-pixbuf-2.0, [gdkpixbuf_found=yes], [gdkpixbuf_found=no])

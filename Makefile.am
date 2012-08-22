@@ -9,6 +9,10 @@ if BUILD_EXAMPLES
 SUBDIRS += examples
 endif
 
+DIST_SUBDIRS = libfprint doc examples
+
+DISTCHECK_CONFIGURE_FLAGS = --with-drivers=upekts,upeke2,upeksonly,uru4000,vcom5s,aes2501,aes1610,aes4000,vfs101 --enable-examples-build --enable-x11-examples-build --with-udev-rules-dir='$${libdir}/udev/rules.d-distcheck'
+
 pkgconfigdir=$(libdir)/pkgconfig
 pkgconfig_DATA=libfprint.pc
 
