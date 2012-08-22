@@ -195,13 +195,25 @@ static int contact_detect(libusb_device_handle *dev);
 struct etes603_data {
 	unsigned int deactivating; /* TODO could be merge with state? */
 	unsigned int state;
-	unsigned int mode; /* Full frame or merging frames TODO to implement/use getenv */
+	unsigned int mode; /* Full frame (0) or merging frames (1) */
 	uint8_t *braw; /* Pointer to raw buffer */
 	uint8_t *braw_cur; /* Current position in the raw buffer */
 	uint8_t *braw_end; /* End of the raw buffer */
 	/* TODO can probably keep registers value, particularly control_mode */
 };
 
+/* Transform array of uint8_t to a string */
+static void sprint_data(char *str, size_t str_sz, uint8_t *data, size_t data_sz)
+{
+	unsigned int i;
+	char *cstr = str;
+	/* Ensure string ends by NULL byte */
+	*cstr = 0;
+	for (i = 0; i < data_sz && cstr < str+str_sz; i++) {
+		snprintf(cstr, 4, "%02X ", data[i]);
+		cstr += 3;
+	}
+}
 
 /* Synchronous function  */
 
@@ -816,7 +828,7 @@ static int tune_vrb(libusb_device_handle *dev)
 	/*reg_e1 = vrt*/
 	/* VRT=0x0A and VRB=0x10 are starting values */
 	/* vrt_max=0x3F  vrb_max=0x3A */
-	uint8_t reg_e1 = 0x0A, reg_e2 = 0x10, reg_e6;
+	uint8_t reg_e0, reg_e1 = 0x0A, reg_e2 = 0x10, reg_e6;
 	int i, j;
 	double hist[16];
 	double white_mean, black_mean;
@@ -826,6 +838,9 @@ static int tune_vrb(libusb_device_handle *dev)
 	f = fopen("calibrate.bin", "w");
 #endif
 	fp_dbg("Experimental tuning of VRT/VRB");
+
+	if (sync_read_registers(dev, 2, REG_GAIN, &reg_e0))
+		goto err;
 
 	/* Reduce DCoffset by 1 */
 	/* TODO is it required? or my DCoffset tuning is wrong? */
@@ -841,7 +856,7 @@ static int tune_vrb(libusb_device_handle *dev)
 			hist[i] = 0.0;
 
 		/* Capture frame */
-		if (sync_read_buffer(dev, 0xC0, 0x01, 0x23, reg_e1, reg_e2, buf)) /* 0x23 is in_sensor_normal_gain/in_sensor_small_gain */
+		if (sync_read_buffer(dev, 0xC0, 0x01, reg_e0, reg_e1, reg_e2, buf)) /* reg_e0=0x23 is in_sensor_normal_gain/in_sensor_small_gain */
 			goto err;
 #ifdef DUMP_CALIBRATE
 		fwrite(buf, 1, 384, f);
@@ -907,7 +922,7 @@ static int tune_vrb(libusb_device_handle *dev)
 	/* In traces, REG_26/REG_27 are set, purpose? values? */
 	//sync_write_registers(dev, 4, REG_26, 0x11, REG_27, 0x00);
 	/* Set Gain/VRT/VRB values found */
-	if (sync_write_registers(dev, 6, REG_GAIN, 0x23, REG_VRT, reg_e1, REG_VRB, reg_e2))
+	if (sync_write_registers(dev, 6, REG_GAIN, reg_e0, REG_VRT, reg_e1, REG_VRB, reg_e2))
 		goto err;
 	/* In traces, it is read again, why? */
 	//sync_read_registers(dev, 6, REG_GAIN, &reg_e0, REG_VRT, &reg_e1, REG_VRB, &reg_e2); /* 0x23 0x0B 0x11 */
@@ -1484,19 +1499,6 @@ static int transform_to_fpi(struct fp_img_dev *dev)
 #define STATE_CAPTURING_FULL_ANS       13
 #define STATE_DEACTIVATING             14
 
-/* Transform array of uint8_t to a string */
-static void sprint_data(char *str, size_t str_sz, uint8_t *data, size_t data_sz)
-{
-	unsigned int i;
-	char *cstr = str;
-	/* Ensure string ends by NULL byte */
-	*cstr = 0;
-	for (i = 0; i < data_sz && cstr < str+str_sz; i++) {
-		snprintf(cstr, 4, "%02X ", data[i]);
-		cstr += 3;
-	}
-}
-
 static int async_read_buffer(struct fp_img_dev *dev, unsigned char ep,
 		unsigned char *msg_data, unsigned int msg_size);
 
@@ -1682,9 +1684,11 @@ MODE_FULL_FRAME:
 			sprint_data(dbg_data, 60, transfer->buffer, transfer->actual_length);
 			fp_dbg("STATE_CAPTURING_FULL_ANS: %s (size %d)", dbg_data, transfer->actual_length);
 			memcpy(pdata->braw, transfer->buffer, transfer->actual_length);
-			transform_to_fpi(dev);
-			/* Continue to deactivate device */
+			/* Set STATE_DEACTIVATING before sending image because
+			 * deactivation is called when image is sent. */
 			pdata->state = STATE_DEACTIVATING;
+			transform_to_fpi(dev);
+			break;
 
 		case STATE_DEACTIVATING:
 			fp_dbg("STATE_DEACTIVATING:");
