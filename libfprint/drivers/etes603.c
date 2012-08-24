@@ -1295,10 +1295,10 @@ static unsigned int process_get_brightness(uint8_t *f)
 {
 	int i;
 	unsigned int sum = 0;
-        for (i = 0; i < FRAME_SIZE; i++) {
-                sum += f[i] & 0x0F;
-                sum += f[i] >> 4;
-        }
+	for (i = 0; i < FRAME_SIZE; i++) {
+		sum += f[i] & 0x0F;
+		sum += f[i] >> 4;
+	}
 	return sum;
 }
 
@@ -1464,7 +1464,7 @@ static int transform_to_fpi(struct fp_img_dev *dev)
 		/* img->width could be set 256 always but need a new function to handle this */
 		img->width = FRAME_WIDTH;
 		process_transform4_to_8(pdata->braw, size, (uint8_t*)img->data);
-	} else  {
+	} else {
 		/* Full Frame */
 		img = fpi_img_new(FRAMEFULL_SIZE * 2);
 		/* Images received are white on black, so invert it (FP_IMG_COLORS_INVERTED) */
@@ -1806,10 +1806,10 @@ static int dev_init(struct fp_img_dev *dev, unsigned long driver_data)
 
 	/* FIXME this should not be useful? do it if an error happens */
 	ret = libusb_reset_device(dev->udev);
-        if (ret != LIBUSB_SUCCESS) {
-                fp_err("libusb_reset_device failed (err=%d)", ret);
-                return ret;
-        }
+	if (ret != LIBUSB_SUCCESS) {
+		fp_err("libusb_reset_device failed (err=%d)", ret);
+		return ret;
+	}
 
 	if ((pdata = malloc(sizeof(struct etes603_data))) == NULL) {
 		return -ENOMEM;
