@@ -17,11 +17,27 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-/* TODO LIST */
-/* - Document main functions */
-/* - Detect sweep direction (support only one direction currently) */
-/* - GPL vs LGPL 3 vs LGPL 2.1 */
-/* - Use different ways to detect fingers */
+/* TODO LIST
+ *   Document main functions
+ *   Detect sweep direction (support only one direction currently)
+ *   Use different ways to detect fingers
+ */
+
+/*
+ * Thanks to all testers with special mention to:
+ *   Chase Montgomery (BLuFeNiX)
+ *   Matthias Macha
+ */
+
+/* EgisTec ES603 device information
+ *   Sensor area: 192 x 4 pixels 
+ *   Sensor gray: 16 gray levels/sensor pixel
+ *   Sensor resolution: 508 dpi 
+ *   USB Manufacturer ID: 1C7A
+ *   USB Product ID: 0603
+ *
+ * Possible compatibility LTT-SS500/SS501 (except 16 pixel instead of 4) ?
+ */
 
 #include <stdio.h>
 #include <unistd.h>
@@ -35,20 +51,6 @@
 
 #define FP_COMPONENT "etes603"
 #include <fp_internal.h>
-
-/* ES603 info
- *  Sensor area: 192 x 4 pixels 
- *  Sensor gray: 16 gray levels/sensor pixel
- *  Sensor resolution: 508 dpi 
- *  USB Manufacturer ID: 1C7A
- *  USB Product ID: 0603
- */
-
-/* Possible compatibility:
- *  LTT-SS500/SS501 (except 16 pixel instead of 4) ?
- *  1C7A 0803 ?
- *  CD15 6711 ?
- */
 
 /* libusb defines */
 #define EP_IN              0x81
@@ -215,7 +217,7 @@ static void sprint_data(char *str, size_t str_sz, uint8_t *data, size_t data_sz)
 	}
 }
 
-/* Synchronous function  */
+/* Synchronous function */
 
 static int sync_transfer(libusb_device_handle *dev, unsigned char ep,
 		struct egis_msg *msg, unsigned int size) 
@@ -277,8 +279,6 @@ static int msg_header_check(struct egis_msg *msg)
 	return 1;
 }
 
-
-
 /*
  * Prepare message to ask for a frame.
  */
@@ -301,12 +301,12 @@ static void msg_read_buffer(struct egis_msg *msg, uint8_t cmd, uint8_t v1,
  * Ask synchronously the sensor for a frame.
  */
 static int sync_read_buffer(libusb_device_handle *dev, uint8_t v1, uint8_t v2,
-	uint8_t gain, uint8_t v4, uint8_t v5, uint8_t *buf)
+	uint8_t gain, uint8_t vrt, uint8_t vrb, uint8_t *buf)
 {
 	struct egis_msg msg;
 	int ret, i;
 
-	msg_read_buffer(&msg, CMD_READ_BUF, v1, v2, gain, v4, v5);
+	msg_read_buffer(&msg, CMD_READ_BUF, v1, v2, gain, vrt, vrb);
 
 	ret = sync_transfer(dev, EP_OUT, &msg, MSG_HEADER_SIZE + 6);
 	if (ret < 0) {
@@ -515,10 +515,10 @@ static int sensor_get_cmd20(libusb_device_handle *dev)
 	}
 	/* TODO is it status or flashtype/flashinfo or ? */
 	if (msg.cmd != 0x05
-			|| msg.sige_misc.val[0] != 0x00
-			|| msg.sige_misc.val[1] != 0x00) {
+	    || msg.sige_misc.val[0] != 0x00
+	    || msg.sige_misc.val[1] != 0x00) {
 		fp_warn("unexpected answer CMD_20 from device (%02X %02X %02X)", msg.cmd,
-				msg.sige_misc.val[0], msg.sige_misc.val[1]);
+			msg.sige_misc.val[0], msg.sige_misc.val[1]);
 	}
 
 	return 0;
@@ -779,6 +779,7 @@ static int tune_dtvrt(libusb_device_handle *dev)
 		if (dtvrt > 5) {
 			dtvrt -= 5;
 		} else if (dtvrt > 1) {
+			/* This does not happen in captured frames */
 			dtvrt -= 1;
 		} else {
 			/* Decrease DCoffset if cannot adjust a value for DTVRT */
@@ -1313,7 +1314,6 @@ static int process_frame_empty(uint8_t *f, int mode)
 {
 	/* int threshold could be replaced by mode == MODE_TUNING || MODE_CAPTURE */
 	unsigned int sum = process_get_brightness(f);
-	/* FIXME: when tuning DC needs more sensibility than capturing */
 	/* Allow an average of 'threshold' luminosity per pixel */
 	if (mode) {
 		/* mode capture */
@@ -1803,14 +1803,14 @@ static int dev_init(struct fp_img_dev *dev, unsigned long driver_data)
 		fp_err("libusb_claim_interface failed on interface 0 (err=%d)", ret);
 		return ret;
 	}
-
+#if 0
 	/* FIXME this should not be useful? do it if an error happens */
 	ret = libusb_reset_device(dev->udev);
 	if (ret != LIBUSB_SUCCESS) {
 		fp_err("libusb_reset_device failed (err=%d)", ret);
 		return ret;
 	}
-
+#endif
 	if ((pdata = malloc(sizeof(struct etes603_data))) == NULL) {
 		return -ENOMEM;
 	}
@@ -1860,7 +1860,7 @@ static const struct usb_id id_table[] = {
 
 struct fp_img_driver etes603_driver = {
 	.driver = {
-		.id = 11,
+		.id = 12,
 		.name = FP_COMPONENT,
 		.full_name = "EgisTec ES603",
 		.id_table = id_table,

@@ -158,7 +158,7 @@ enum fp_imgdev_enroll_state {
 
 enum fp_imgdev_verify_state {
 	IMG_VERIFY_STATE_NONE = 0,
-	IMG_VERIFY_STATE_ACTIVATING 
+	IMG_VERIFY_STATE_ACTIVATING
 };
 
 struct fp_img_dev {
@@ -268,6 +268,9 @@ extern struct fp_img_driver vcom5s_driver;
 #ifdef ENABLE_VFS101
 extern struct fp_img_driver vfs101_driver;
 #endif
+#ifdef ENABLE_VFS301
+extern struct fp_img_driver vfs301_driver;
+#endif
 #ifdef ENABLE_ETES603
 extern struct fp_img_driver etes603_driver;
 #endif
@@ -328,8 +331,8 @@ struct fp_minutiae {
 };
 
 /* bit values for fp_img.flags */
-#define FP_IMG_V_FLIPPED 		(1<<0)
-#define FP_IMG_H_FLIPPED 		(1<<1)
+#define FP_IMG_V_FLIPPED	(1<<0)
+#define FP_IMG_H_FLIPPED	(1<<1)
 #define FP_IMG_COLORS_INVERTED	(1<<2)
 #define FP_IMG_BINARIZED_FORM	(1<<3)
 

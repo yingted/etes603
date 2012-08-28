@@ -23,7 +23,7 @@ AC_SUBST(lt_major)
 AC_SUBST(lt_revision)
 AC_SUBST(lt_age)
 
-all_drivers="upeke2 upekts upektc upeksonly vcom5s uru4000 fdu2000 aes1610 aes2501 aes4000 vfs101 etes603"
+all_drivers="upeke2 upekts upektc upeksonly vcom5s uru4000 fdu2000 aes1610 aes2501 aes4000 vfs101 vfs301 etes603"
 
 require_imaging='no'
 require_aeslib='no'
@@ -38,6 +38,7 @@ enable_aes1610='no'
 enable_aes2501='no'
 enable_aes4000='no'
 enable_vfs101='no'
+enable_vfs301='no'
 enable_etes603='no'
 
 AC_ARG_WITH([drivers],[AS_HELP_STRING([--with-drivers],
@@ -97,6 +98,9 @@ for driver in `echo ${drivers} | sed -e 's/,/ /g' -e 's/,$//g'`; do
 			AC_DEFINE([ENABLE_VFS101], [], [Build Validity VFS101 driver])
 			enable_vfs101="yes"
 		;;
+		vfs301)
+			AC_DEFINE([ENABLE_VFS301], [], [Build Validity VFS301/VFS300 driver])
+			enable_vfs301="yes"
 		etes603)
 			AC_DEFINE([ENABLE_ETES603], [], [Build EgisTec ES603 driver])
 			enable_etes603="yes"
@@ -116,6 +120,7 @@ AM_CONDITIONAL([ENABLE_AES2501], [test "$enable_aes2501" = "yes"])
 AM_CONDITIONAL([ENABLE_AES4000], [test "$enable_aes4000" = "yes"])
 AM_CONDITIONAL([REQUIRE_AESLIB], [test "$require_aeslib" = "yes"])
 AM_CONDITIONAL([ENABLE_VFS101], [test "$enable_vfs101" = "yes"])
+AM_CONDITIONAL([ENABLE_VFS301], [test "$enable_vfs301" = "yes"])
 AM_CONDITIONAL([ENABLE_ETES603], [test "$enable_etes603" = "yes"])
 
 
@@ -198,17 +203,17 @@ if test "x$build_x11_examples" != "xno"; then
 		AC_MSG_CHECKING(for Xv extensions)
 		AC_TRY_COMPILE([
 		#include <X11/Xlib.h>
-	 	#include <X11/extensions/Xvlib.h>],[
+		#include <X11/extensions/Xvlib.h>],[
 		int main(void) { (void) XvGetPortAttribute(0, 0, 0, 0); return 0; }
 		],xv=yes,xv=no);
 		AC_MSG_RESULT($xv)
-	 	if test x$xv = xyes; then
-    	       XV_LIBS="-lXv -lXext"
-        	   XV_CFLAGS=""
+		if test x$xv = xyes; then
+	       XV_LIBS="-lXv -lXext"
+	       XV_CFLAGS=""
 		   AC_DEFINE(HAVE_XV,1,[defined if XV video overlay is available])
 		else
 			AC_MSG_ERROR([XV is required for X11 examples])
- 		fi
+		fi
 	])
 	AC_CHECK_XV
 fi
@@ -304,6 +309,10 @@ if test x$enable_vfs101 != xno ; then
 else
 	AC_MSG_NOTICE([   vfs101 driver disabled])
 fi
+if test x$enable_vfs301 != xno ; then
+	AC_MSG_NOTICE([** vfs301 driver enabled])
+else
+	AC_MSG_NOTICE([   vfs301 driver disabled])
 if test x$enable_etes603 != xno ; then
 	AC_MSG_NOTICE([** etes603 driver enabled])
 else
