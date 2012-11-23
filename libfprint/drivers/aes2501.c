@@ -2,7 +2,7 @@
  * AuthenTec AES2501 driver for libfprint
  * Copyright (C) 2007-2008 Daniel Drake <dsd@gentoo.org>
  * Copyright (C) 2007 Cyrille Bagard
- * Copyright (C) 2007 Vasily Khoruzhick
+ * Copyright (C) 2007-2008, 2012 Vasily Khoruzhick <anarsoul@gmail.com>
  *
  * Based on code from http://home.gna.org/aes2501, relicensed with permission
  *
@@ -30,7 +30,9 @@
 
 #include <aeslib.h>
 #include <fp_internal.h>
+
 #include "aes2501.h"
+#include "driver_ids.h"
 
 static void start_capture(struct fp_img_dev *dev);
 static void complete_deactivation(struct fp_img_dev *dev);
@@ -67,6 +69,7 @@ struct aes2501_dev {
 	GSList *strips;
 	size_t strips_len;
 	gboolean deactivating;
+	int no_finger_cnt;
 };
 
 typedef void (*aes2501_read_regs_cb)(struct fp_img_dev *dev, int status,
@@ -514,13 +517,13 @@ static const struct aes_regwrite capture_reqs_2[] = {
 	{ AES2501_REG_CTRL2, AES2501_CTRL2_SET_ONE_SHOT },
 };
 
-static const struct aes_regwrite strip_scan_reqs[] = {
+static struct aes_regwrite strip_scan_reqs[] = {
 	{ AES2501_REG_IMAGCTRL,
 		AES2501_IMAGCTRL_TST_REG_ENABLE | AES2501_IMAGCTRL_HISTO_DATA_ENABLE },
 	{ AES2501_REG_STRTCOL, 0x00 },
 	{ AES2501_REG_ENDCOL, 0x2f },
 	{ AES2501_REG_CHANGAIN, AES2501_CHANGAIN_STAGE1_16X },
-	{ AES2501_REG_ADREFHI, 0x5b },
+	{ AES2501_REG_ADREFHI, AES2501_ADREFHI_MAX_VALUE },
 	{ AES2501_REG_ADREFLO, 0x20 },
 	{ AES2501_REG_CTRL2, AES2501_CTRL2_SET_ONE_SHOT },
 };
@@ -559,12 +562,6 @@ static void capture_read_strip_cb(struct libusb_transfer *transfer)
 		goto out;
 	}
 
-	/* FIXME: would preallocating strip buffers be a decent optimization? */
-	stripdata = g_malloc(192 * 8);
-	memcpy(stripdata, data + 1, 192*8);
-	aesdev->strips = g_slist_prepend(aesdev->strips, stripdata);
-	aesdev->strips_len++;
-
 	threshold = regval_from_dump(data + 1 + 192*8 + 1 + 16*2 + 1 + 8,
 		AES2501_REG_DATFMT);
 	if (threshold < 0) {
@@ -572,27 +569,47 @@ static void capture_read_strip_cb(struct libusb_transfer *transfer)
 		goto out;
 	}
 
-    sum = sum_histogram_values(data + 1 + 192*8, threshold & 0x0f);
+	sum = sum_histogram_values(data + 1 + 192*8, threshold & 0x0f);
 	if (sum < 0) {
 		fpi_ssm_mark_aborted(ssm, sum);
 		goto out;
 	}
 	fp_dbg("sum=%d", sum);
 
-	/* FIXME: 0 might be too low as a threshold */
-	/* FIXME: sometimes we get 0 in the middle of a scan, should we wait for
-	 * a few consecutive zeroes? */
-	/* FIXME: we should have an upper limit on the number of strips */
+	if (sum < AES2501_SUM_LOW_THRESH) {
+		strip_scan_reqs[4].value -= 0x8;
+		if (strip_scan_reqs[4].value < AES2501_ADREFHI_MIN_VALUE)
+			strip_scan_reqs[4].value = AES2501_ADREFHI_MIN_VALUE;
+	} else if (sum > AES2501_SUM_HIGH_THRESH) {
+		strip_scan_reqs[4].value += 0x8;
+		if (strip_scan_reqs[4].value > AES2501_ADREFHI_MAX_VALUE)
+			strip_scan_reqs[4].value = AES2501_ADREFHI_MAX_VALUE;
+	}
+	fp_dbg("ADREFHI is %.2x", strip_scan_reqs[4].value);
 
-	/* If sum is 0, finger has been removed */
+	/* Sum is 0, maybe finger was removed? Wait for 3 empty frames
+	 * to ensure
+	 */
 	if (sum == 0) {
-		/* assemble image and submit it to library */
-		assemble_and_submit_image(dev);
-		fpi_imgdev_report_finger_status(dev, FALSE);
-		/* marking machine complete will re-trigger finger detection loop */
-		fpi_ssm_mark_completed(ssm);
+		aesdev->no_finger_cnt++;
+		if (aesdev->no_finger_cnt == 3) {
+			/* assemble image and submit it to library */
+			assemble_and_submit_image(dev);
+			fpi_imgdev_report_finger_status(dev, FALSE);
+			/* marking machine complete will re-trigger finger detection loop */
+			fpi_ssm_mark_completed(ssm);
+		} else {
+			fpi_ssm_jump_to_state(ssm, CAPTURE_REQUEST_STRIP);
+		}
 	} else {
 		/* obtain next strip */
+		/* FIXME: would preallocating strip buffers be a decent optimization? */
+		stripdata = g_malloc(192 * 8);
+		memcpy(stripdata, data + 1, 192*8);
+		aesdev->no_finger_cnt = 0;
+		aesdev->strips = g_slist_prepend(aesdev->strips, stripdata);
+		aesdev->strips_len++;
+
 		fpi_ssm_jump_to_state(ssm, CAPTURE_REQUEST_STRIP);
 	}
 
@@ -677,6 +694,9 @@ static void start_capture(struct fp_img_dev *dev)
 		return;
 	}
 
+	aesdev->no_finger_cnt = 0;
+	/* Reset gain */
+	strip_scan_reqs[4].value = AES2501_ADREFHI_MAX_VALUE;
 	ssm = fpi_ssm_new(dev->dev, capture_run_state, CAPTURE_NUM_STATES);
 	fp_dbg("");
 	ssm->priv = dev;
@@ -945,7 +965,7 @@ static const struct usb_id id_table[] = {
 
 struct fp_img_driver aes2501_driver = {
 	.driver = {
-		.id = 4,
+		.id = AES2501_ID,
 		.name = FP_COMPONENT,
 		.full_name = "AuthenTec AES2501",
 		.id_table = id_table,
