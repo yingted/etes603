@@ -260,7 +260,7 @@ static void debug_output(unsigned char ep, uint8_t *data, size_t size) {
 	fwrite("\n", 1, 1, fdebug);
 }
 #else
-static inline void debug_output() {}
+# define debug_output(...)
 #endif
 
 /*
@@ -1548,8 +1548,9 @@ static void async_transfer_cb(struct libusb_transfer *transfer)
 	}
 	/* To ensure non-fragmented message, LIBUSB_TRANSFER_SHORT_NOT_OK is
 	 * used. */
-	if (pdata->state != STATE_INIT)
+	if (pdata->state != STATE_INIT) {
 		debug_output(transfer->endpoint, transfer->buffer, transfer->actual_length);
+	}
 
 goback:
 
@@ -1562,11 +1563,11 @@ goback:
 
 	switch (pdata->state) {
 	case STATE_INIT:
+		fp_dbg("Waiting finger to be present...");
 		pdata->state = STATE_FINGER_REQ_SEND;
 		/* no break, we are continuing with next step */
 
 	case STATE_FINGER_REQ_SEND:
-		fp_dbg("STATE_FINGER_REQ_SEND:");
 		msg = malloc(sizeof(struct egis_msg));
 		msg_get_frame(msg, FRAME_WIDTH, 0, 0, 0, 0);
 		if (async_transfer(idev, EP_OUT, (unsigned char *)msg, MSG_HDR_SIZE + 6)) {
@@ -1576,7 +1577,6 @@ goback:
 		break;
 
 	case STATE_FINGER_REQ_RECV:
-		fp_dbg("STATE_FINGER_REQ_RECV:");
 		/* The request succeeds. */
 		msg = malloc(FRAME_SIZE);
 		memset(msg, 0, FRAME_SIZE);
@@ -1588,7 +1588,6 @@ goback:
 		break;
 
 	case STATE_FINGER_ANS:
-		fp_dbg("STATE_FINGER_ANS:");
 		if (process_frame_empty(transfer->buffer, FRAME_SIZE, 1)) {
 			/* No finger, request a new frame. */
 			pdata->state = STATE_FINGER_REQ_SEND;
@@ -1598,15 +1597,16 @@ goback:
 		fpi_imgdev_report_finger_status(idev, TRUE);
 		/* Select mode for capturing. */
 		if (pdata->mode == 1) {
+			fp_dbg("Finger is detected, assembled frames mode");
 			pdata->state = STATE_CAPTURING_REQ_SEND;
 		} else {
+			fp_dbg("Finger is detected, FP mode");
 			pdata->state = STATE_INIT_FP_REQ_SEND;
 			goto MODE_FP;
 		}
 		/* no break, continue to state STATE_CAPTURING_REQ_SEND. */
 
 	case STATE_CAPTURING_REQ_SEND:
-		fp_dbg("STATE_CAPTURING_REQ_SEND:");
 		msg = malloc(sizeof(struct egis_msg));
 		msg_get_frame(msg, FRAME_WIDTH, 0, 0, 0, 0);
 		if (async_transfer(idev, EP_OUT, (unsigned char *)msg, MSG_HDR_SIZE + 6)) {
@@ -1616,7 +1616,6 @@ goback:
 		break;
 
 	case STATE_CAPTURING_REQ_RECV:
-		fp_dbg("STATE_CAPTURING_REQ_RECV:");
 		/* The request succeeds. */
 		msg = malloc(FRAME_SIZE);
 		memset(msg, 0, FRAME_SIZE);
@@ -1628,7 +1627,6 @@ goback:
 		break;
 
 	case STATE_CAPTURING_ANS:
-		fp_dbg("STATE_CAPTURING_ANS:");
 		if (process_frame_empty(transfer->buffer, FRAME_SIZE, 1)) {
 			/* Finger leaves, send final image. */
 			pdata->state = STATE_DEACTIVATING;
@@ -1651,7 +1649,6 @@ goback:
 	case STATE_INIT_FP_REQ_SEND:
 MODE_FP:
 		/* Change to mode REG_MODE_FP */
-		fp_dbg("STATE_INIT_FP_REQ_SEND:");
 		msg = malloc(sizeof(struct egis_msg));
 		msg_header_prepare(msg);
 		msg->cmd = CMD_WRITE_REG;
@@ -1665,7 +1662,6 @@ MODE_FP:
 		break;
 
 	case STATE_INIT_FP_REQ_RECV:
-		fp_dbg("STATE_INIT_FP_REQ_RECV:");
 		/* The request succeeds. */
 		msg = malloc(sizeof(struct egis_msg));
 		memset(msg, 0, sizeof(struct egis_msg));
@@ -1677,7 +1673,6 @@ MODE_FP:
 		break;
 
 	case STATE_INIT_FP_ANS:
-		fp_dbg("STATE_INIT_FP_ANS:");
 		msg = (struct egis_msg *)transfer->buffer;
 		if (msg_header_check(msg))
 			goto err;
@@ -1687,7 +1682,6 @@ MODE_FP:
 		/* continuing, now ask for the fingerprint frame */
 
 	case STATE_CAPTURING_FP_REQ_SEND:
-		fp_dbg("STATE_CAPTURING_FP_REQ_SEND:");
 		msg = malloc(sizeof(struct egis_msg));
 		msg_get_fp(msg, 0x01, 0xF4, 0x02, 0x01, 0x64);
 		if (async_transfer(idev, EP_OUT, (unsigned char *)msg, MSG_HDR_SIZE + 5)) {
@@ -1697,7 +1691,6 @@ MODE_FP:
 		break;
 
 	case STATE_CAPTURING_FP_REQ_RECV:
-		fp_dbg("STATE_CAPTURING_FP_REQ_RECV:");
 		/* The request succeeds. */
 		msg = malloc(FRAMEFP_SIZE);
 		memset(msg, 0, FRAMEFP_SIZE);
@@ -1709,7 +1702,6 @@ MODE_FP:
 		break;
 
 	case STATE_CAPTURING_FP_ANS:
-		fp_dbg("STATE_CAPTURING_FP_ANS:");
 		memcpy(pdata->braw, transfer->buffer, transfer->actual_length);
 		/* Set STATE_DEACTIVATING before sending image because
 		 * deactivation is called when image is sent. */
