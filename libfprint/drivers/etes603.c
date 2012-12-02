@@ -17,12 +17,6 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-/* TODO LIST
- *   Document main functions
- *   Detect sweep direction (support only one direction currently)
- *   Use different ways to detect fingers
- */
-
 /*
  * Thanks to all testers with special mention to:
  *   Chase Montgomery (BLuFeNiX)
@@ -30,13 +24,21 @@
  */
 
 /* EgisTec ES603 device information
- *   Sensor area: 192 x 4 pixels 
+ *   Sensor area: 192 x 4 pixels
  *   Sensor gray: 16 gray levels/sensor pixel
- *   Sensor resolution: 508 dpi 
+ *   Sensor resolution: 508 dpi
  *   USB Manufacturer ID: 1C7A
  *   USB Product ID: 0603
  *
  * Possible compatibility LTT-SS500/SS501 (except 16 pixel instead of 4) ?
+ *
+ * To log communication with the sensor, just define DEBUG_TRANSFER.
+ * #define DEBUG_TRANSFER
+ */
+
+/* TODO LIST
+ *   Detect sweep direction (support only one direction currently)
+ *   Use different ways to detect fingers
  */
 
 #include <stdio.h>
@@ -46,57 +48,61 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <assert.h>
 #include <sys/time.h>
 #include <libusb.h>
 
 #define FP_COMPONENT "etes603"
 #include <fp_internal.h>
+#include "driver_ids.h"
 
 /* libusb defines */
 #define EP_IN              0x81
 #define EP_OUT             0x02
-#define BULK_TIMEOUT       1000  /* TODO 1000 ms is not enough sometimes for full frame since the sensor is waiting moves. */
+#define BULK_TIMEOUT       1000 /* Note that 1000 ms is usually enough but with CMD_READ_FP could be longer since the sensor is waiting motion. */
 
 /* es603 defines */
-#define FRAME_SIZE         384   /* size in bytes */
-#define FRAME_WIDTH        192   /* pixels per row */
-#define FRAME_HEIGHT       4     /* number of rows */
-#define FRAMEFULL_SIZE     64000 /* size in bytes */
-#define FRAMEFULL_WIDTH    256   /* pixels per row */
-#define FRAMEFULL_HEIGHT   500   /* number of rows */
+#define FRAME_WIDTH        192  /* pixels per row */
+#define FRAME_HEIGHT       4    /* number of rows */
+#define FRAME_SIZE         384  /* size in bytes: FRAME_WIDTH * FRAME_HEIGH / 2 pixels per byte */
+#define FRAMEFP_WIDTH      256  /* pixels per row */
+#define FRAMEFP_HEIGHT     500  /* number of rows */
+#define FRAMEFP_SIZE       64000 /* size in bytes: width * height / 2 pixels per byte */
 
-#define GAIN_SMALL_INIT    0x23  /* Initial small gain */
-#define DCOFFSET_MIN       0x00  /* Minimum value for DCoffset */
-#define DCOFFSET_MAX       0x35  /* Maximum value for DCoffset */
-#define DTVRT_MAX          0x3A  /* Maximum value for DTVRT */
+#define GAIN_SMALL_INIT    0x23 /* Initial small gain */
+#define VRT_MAX	           0x3F /* Maximum value for VRT */
+#define VRB_MAX            0x3A /* Maximum value for VRB */
+#define DTVRT_MAX          0x3A /* Maximum value for DTVRT */
+#define DCOFFSET_MIN       0x00 /* Minimum value for DCoffset */
+#define DCOFFSET_MAX       0x35 /* Maximum value for DCoffset */
 
 /* es603 commands */
 #define CMD_READ_REG       0x01
 #define CMD_WRITE_REG      0x02
-#define CMD_READ_BUF       0x03
-#define CMD_READ_BUF2      0x06
-#define CMD_20             0x20
-#define CMD_25             0x25
-#define CMD_60             0x60 /* ??? */
+#define CMD_READ_FRAME     0x03 /* Read the sensor area */
+#define CMD_READ_FP        0x06 /* Read a fingerprint */
+#define CMD_20             0x20 /* ? */
+#define CMD_25             0x25 /* ? */
+#define CMD_60             0x60 /* ? */
 
-#define CMD_OK             0x01
+#define CMD_OK             0x01 /* Command successfully executed */
 
 /* es603 registers */
-#define REG_MAX            0x18 /* Maximum number of register to read/write in one command */
+#define REG_MAX            0x18 /* Maximum number of registers in one message */
 #define REG_MODE_CONTROL   0x02 /* Mode control */
 #define REG_03             0x03 /* Contact register? */
 #define REG_04             0x04 /* ? */
-#define REG_10             0x10 /* MVS/FRMBUF Control Reg */
+#define REG_10             0x10 /* MVS FRMBUF control */
 #define REG_1A             0x1A /* ? */
-/* BEGIN init_sensor */
+/* BEGIN init sensor */
 #define REG_20             0x20 /* (def: 0x00) */
-#define REG_21             0x21 /* small_gain (def: 0x23) */
-#define REG_22             0x22 /* normal_gain (def: 0x21) */
-#define REG_23             0x23 /* large_gain (def: 0x20) */
+#define REG_21             0x21 /* Small gain (def: 0x23) */
+#define REG_22             0x22 /* Normal gain (def: 0x21) */
+#define REG_23             0x23 /* Large gain (def: 0x20) */
 #define REG_24             0x24 /* (def: 0x14) */
 #define REG_25             0x25 /* (def: 0x6A) */
 #define REG_26             0x26 /* VRB again? (def: 0x00) */
-#define REG_27             0x27 /* VRT?? (def: 0x00) */
+#define REG_27             0x27 /* VRT again? (def: 0x00) */
 #define REG_28             0x28 /* (def: 0x00) */
 #define REG_29             0x29 /* (def: 0xC0) */
 #define REG_2A             0x2A /* (def: 0x50) */
@@ -113,10 +119,10 @@
 #define REG_35             0x35 /* (def: 0x08) */
 #define REG_36             0x36 /* (def: 0x03) */
 #define REG_37             0x37 /* (def: 0x21) */
-/* END init_sensor */
+/* END init sensor */
 
 #define REG_ENC1           0x41 /* Encryption 1 */
-#define REG_ENC2           0x42 
+#define REG_ENC2           0x42
 #define REG_ENC3           0x43
 #define REG_ENC4           0x44
 #define REG_ENC5           0x45
@@ -124,136 +130,164 @@
 #define REG_ENC7           0x47
 #define REG_ENC8           0x48 /* Encryption 8 */
 
-#define REG_50             0x50
-#define REG_51             0x51
-#define REG_59             0x59
-#define REG_5A             0x5A
-#define REG_5B             0x5B
+#define REG_50             0x50 /* ? For contact detection */
+#define REG_51             0x51 /* ? */
+#define REG_59             0x59 /* ? */
+#define REG_5A             0x5A /* ? */
+#define REG_5B             0x5B /* ? */
 
 #define REG_INFO0          0x70 /* Sensor model byte0 */
 #define REG_INFO1          0x71 /* Sensor model byte1 */
 #define REG_INFO2          0x72 /* Sensor model byte2 */
 #define REG_INFO3          0x73 /* Sensor model byte3 */
 
-#define REG_93             0x93
-#define REG_94             0x94
+#define REG_93             0x93 /* ? */
+#define REG_94             0x94 /* ? */
 
-#define REG_GAIN           0xE0 /* Gain */
-#define REG_VRT            0xE1 /* VRT */
-#define REG_VRB            0xE2 /* VRB */
-#define REG_DTVRT          0xE3 /* DTVRT, used for contact gain */
-#define REG_VCO_CONTROL    0xE5 /* VCO_CONTROL: possible value 0x13, 0x14 (REALTIME) */
-#define REG_DCOFFSET       0xE6 /* DCoffset */
+#define REG_GAIN           0xE0
+#define REG_VRT            0xE1
+#define REG_VRB            0xE2
+#define REG_DTVRT          0xE3 /* used for contact detection */
+#define REG_VCO_CONTROL    0xE5 /* 0x13 (IDLE?), 0x14 (REALTIME) */
+#define REG_DCOFFSET       0xE6
 
-#define REG_F0             0xF0 /* init:0x00 close:0x01 */
-#define REG_F2             0xF2 /* init:0x00 close:0x4E */
+#define REG_F0             0xF0 /* ? init:0x00 close:0x01 */
+#define REG_F2             0xF2 /* ? init:0x00 close:0x4E */
 
 #define REG_MODE_SLEEP     0x30 /* Sleep mode */
 #define REG_MODE_CONTACT   0x31 /* Contact mode */
 #define REG_MODE_SENSOR    0x33 /* Sensor mode */
-#define REG_MODE_34        0x34 /* Full Frame mode (Fly-Estimation®) */
+#define REG_MODE_FP        0x34 /* FingerPrint mode (Fly-Estimation®) */
 
-/* Contact sensor paramter */
+#define REG_VCO_IDLE       0x13
+#define REG_VCO_RT         0x14 /* Realtime */
+
+/* Contact sensor parameters */
 #define CS_DETECT_TIMEOUT  5000 /* Waiting time to detect contact (ms) */
 #define CS_DETECT_DELAY    5    /* Delay between each test (ms) */
 
-/* This structure must be packed because it is a the raw message sent.
- * __attribute__((packed)) could be added if required. */
+/* This structure must be packed because it is a the raw message sent. */
 struct egis_msg {
-  uint8_t magic[5]; /* out: 'EGIS' 0x09 / in: 'SIGE' 0x0A */
-  uint8_t cmd;
-  union {
-    struct {
-      uint8_t nb;
-      uint8_t regs[REG_MAX];
-    } egis_readreg;
-    struct {
-      uint8_t regs[REG_MAX];
-    } sige_readreg;
-    struct {
-      uint8_t nb;
-      struct {
-        uint8_t reg;
-        uint8_t val;
-      } regs[REG_MAX];
-    } egis_writereg;
-    struct {
-      uint8_t val[6];
-    } egis_readbuf;
-    struct {
-      uint8_t val[5];
-    } sige_misc;
-    uint8_t padding[0x40-6]; /* Ensure size of 0x40 */
-  };
-};
+	uint8_t magic[5]; /* out: 'EGIS' 0x09 / in: 'SIGE' 0x0A */
+	uint8_t cmd;
+	union {
+		struct {
+			uint8_t nb;
+			uint8_t regs[REG_MAX];
+		} egis_readreg;
+		struct {
+			uint8_t regs[REG_MAX];
+		} sige_readreg;
+		struct {
+			uint8_t nb;
+			struct {
+				uint8_t reg;
+				uint8_t val;
+			} regs[REG_MAX];
+		} egis_writereg;
+		struct {
+			uint8_t length_factor;
+			uint8_t length;
+			uint8_t use_gvv;
+			uint8_t gain;
+			uint8_t vrt;
+			uint8_t vrb;
+		} egis_readf;
+		struct {
+			uint8_t len[2];
+			uint8_t val[3];
+		} egis_readfp;
+		struct {
+			uint8_t val[5];
+		} sige_misc;
+		uint8_t padding[0x40-6]; /* Ensure size of 0x40 */
+	};
+} __attribute__((packed));
 
-
-/* Forward declarations */
-static uint8_t *process_frame(uint8_t *buffer, uint8_t *newf);
-static int process_frame_empty(uint8_t *f, int mode);
-static int contact_detect(libusb_device_handle *dev);
 
 /* Structure to keep information between asynchronous functions. */
-struct etes603_data {
+struct etes603_dev {
+	libusb_device_handle *udev;
+	uint8_t gain;
+	uint8_t dcoffset;
+	uint8_t vrt;
+	uint8_t vrb;
+	/* Realtime capture and contact detection may required different
+	 * DCOffset. */
+	uint8_t dcoffset_ct;
+	uint8_t dtvrt;
+	/* TODO can probably keep registers value, particularly control_mode */
+
+	/* Asynchronous fields */
 	unsigned int deactivating; /* TODO could be merge with state? */
 	unsigned int state;
-	unsigned int mode; /* Full frame (0) or merging frames (1) */
+	unsigned int mode; /* FingerPrint mode (0) or merging frames (1) */
 	uint8_t *braw; /* Pointer to raw buffer */
 	uint8_t *braw_cur; /* Current position in the raw buffer */
 	uint8_t *braw_end; /* End of the raw buffer */
-	/* TODO can probably keep registers value, particularly control_mode */
 };
 
-/* Transform array of uint8_t to a string */
-static void sprint_data(char *str, size_t str_sz, uint8_t *data, size_t data_sz)
-{
+/* Forward declarations */
+static uint8_t *process_frame(uint8_t *dst, uint8_t *src);
+static int process_frame_empty(uint8_t *f, size_t s, int mode);
+static int contact_detect(struct etes603_dev *dev);
+
+#ifdef DEBUG_TRANSFER
+static void debug_output(unsigned char ep, uint8_t *data, size_t size) {
 	unsigned int i;
-	char *cstr = str;
-	/* Ensure string ends by NULL byte */
-	*cstr = 0;
-	for (i = 0; i < data_sz && cstr < str+str_sz; i++) {
-		snprintf(cstr, 4, "%02X ", data[i]);
-		cstr += 3;
+	static FILE * fdebug = NULL;
+
+	if (fdebug == NULL) {
+		if ((fdebug = fopen("/tmp/etes603", "w")) == NULL) {
+			fp_dbg("Cannot open file /tmp/etes6030 (errno=%d)", errno);
+			fdebug = (void *)~0;
+		}
 	}
+	if (fdebug == (void *)~0) {
+		return;
+	}
+
+	if (ep == EP_OUT)
+		fprintf(fdebug, ">>> %lu bytes\n", size);
+	else if (ep == EP_IN)
+		fprintf(fdebug, "<<< %lu bytes\n", size);
+
+	for (i = 0; i < size; i++) {
+		if (i != 0 && i % 16 == 0)
+			fwrite("\n", 1, 1, fdebug);
+		fprintf(fdebug, "%02X ", data[i]);
+	}
+	fwrite("\n", 1, 1, fdebug);
 }
+#else
+static inline void debug_output() {}
+#endif
 
-/* Synchronous function */
-
-static int sync_transfer(libusb_device_handle *dev, unsigned char ep,
-		struct egis_msg *msg, unsigned int size) 
+/*
+ * Transfer (in/out) egis command to the device using synchronous libusb.
+ */
+static int sync_transfer(libusb_device_handle *udev, unsigned char ep,
+		struct egis_msg *msg, unsigned int size)
 {
 	int ret, actual_length;
 	unsigned char *data = (unsigned char *)msg;
 
-#ifdef DEBUG
-	if (!dev) {
-		fp_err("libusb not initialized");
-		return -1;
-	}
-#endif
+	assert(udev != NULL);
 
-	ret = libusb_bulk_transfer(dev, ep, data, size, &actual_length,
-			BULK_TIMEOUT);
+	ret = libusb_bulk_transfer(udev, ep, data, size, &actual_length,
+				   BULK_TIMEOUT);
 
 	if (ret < 0) {
-		fp_err("Bulk write error %d", ret);
-		return -2;
+		fp_err("Bulk write error %s (%d)", libusb_error_name(ret), ret);
+		return -EIO;
 	}
-
-#ifdef DEBUG_TRANSFER
-	char dbg_data[60]; /* Format is "00 11 ... \0" */
-	sprint_data(dbg_data, 60, data, actual_length);
-	if (ep == EP_OUT)
-		fp_dbg("send: %s (%d bytes)", dbg_data, actual_length);
-	else if (ep == EP_IN)
-		fp_dbg("recv %s (%d bytes)", dbg_data, actual_length);
-#endif
+	debug_output(ep, data, actual_length);
 
 	return actual_length;
 }
 
 /* The size of the message header is 5 plus 1 for the command. */
-#define MSG_HEADER_SIZE 6
+#define MSG_HDR_SIZE 6
 
 /*
  * Prepare the header of the message to be sent to the device.
@@ -276,45 +310,72 @@ static int msg_header_check(struct egis_msg *msg)
 	    && msg->magic[2] == 'G' && msg->magic[3] == 'E'
 	    && msg->magic[4] == 0x0A)
 		return 0;
-	return 1;
+	return -1;
 }
 
 /*
  * Prepare message to ask for a frame.
  */
-static void msg_read_buffer(struct egis_msg *msg, uint8_t cmd, uint8_t v1,
-	uint8_t v2, uint8_t v3, uint8_t v4, uint8_t v5)
+static void msg_get_frame(struct egis_msg *msg, uint8_t length,
+	uint8_t use_gvv, uint8_t gain, uint8_t vrt, uint8_t vrb)
 {
 	msg_header_prepare(msg);
-	/* cmd can be CMD_READ_BUF or CMD_READ_BUF2 */
-	msg->cmd = cmd;
-	msg->egis_readbuf.val[0] = 0x01;
-	msg->egis_readbuf.val[1] = v1;
-	msg->egis_readbuf.val[2] = v2;
-	msg->egis_readbuf.val[3] = v3;
-	msg->egis_readbuf.val[4] = v4;
-	/* This value is useless if CMD_READ_BUF2 (request is 1 byte smaller) */
-	msg->egis_readbuf.val[5] = v5;
+	msg->cmd = CMD_READ_FRAME;
+	msg->egis_readf.length_factor = 0x01;
+	/* length should be 0xC0 */
+	msg->egis_readf.length = length;
+	msg->egis_readf.use_gvv = use_gvv;
+	/* if use_gvv is set, gain/vrt/vrb are used */
+	msg->egis_readf.gain = gain;
+	msg->egis_readf.vrt = vrt;
+	msg->egis_readf.vrb = vrb;
+}
+
+/*
+ * Prepare message to ask for a fingerprint frame.
+ */
+static void msg_get_fp(struct egis_msg *msg, uint8_t len0, uint8_t len1,
+	uint8_t v2, uint8_t v3, uint8_t v4)
+{
+	msg_header_prepare(msg);
+	msg->cmd = CMD_READ_FP;
+	/* Unknown values and always same on captured frames.
+	 * 1st 2nd bytes is unsigned short for height, but only on value range
+	 * 0x01 0xF4 (500), 0x02 0x00 (512), 0x02 0xF4 (756) are ok
+	 */
+	msg->egis_readfp.len[0] = len0;
+	msg->egis_readfp.len[1] = len1;
+	/* 3rd byte : ?? but changes frame size
+	 * 4th byte : 0x00 -> can change width
+	 * 5th byte : motion sensibility?
+	 */
+	msg->egis_readfp.val[0] = v2;
+	msg->egis_readfp.val[1] = v3;
+	msg->egis_readfp.val[2] = v4;
 }
 
 /*
  * Ask synchronously the sensor for a frame.
+ * if use_gvv is 0, gain/vrt/vrb are ineffective.
  */
-static int sync_read_buffer(libusb_device_handle *dev, uint8_t v1, uint8_t v2,
-	uint8_t gain, uint8_t vrt, uint8_t vrb, uint8_t *buf)
+static int dev_get_frame(libusb_device_handle *udev, uint8_t length,
+	uint8_t use_gvv, uint8_t gain, uint8_t vrt, uint8_t vrb, uint8_t *buf)
 {
 	struct egis_msg msg;
-	int ret, i;
+	int ret;
+	unsigned int i, fsize = length * 2;
 
-	msg_read_buffer(&msg, CMD_READ_BUF, v1, v2, gain, vrt, vrb);
+	msg_get_frame(&msg, length, use_gvv, gain, vrt, vrb);
 
-	ret = sync_transfer(dev, EP_OUT, &msg, MSG_HEADER_SIZE + 6);
+	ret = sync_transfer(udev, EP_OUT, &msg, MSG_HDR_SIZE + 6);
 	if (ret < 0) {
 		fp_err("sync_transfer EP_OUT failed");
 		goto err;
 	}
-	for (i = 0 ; i < FRAME_SIZE; i += ret) {
-		ret = sync_transfer(dev, EP_IN, (struct egis_msg *)(buf+i), FRAME_SIZE/* - i*/); 
+
+	for (i = 0 ; i < fsize; i += ret) {
+		ret = sync_transfer(udev, EP_IN, (struct egis_msg *)(buf + i),
+				    fsize - i);
 		if (ret < 0) {
 			fp_err("sync_transfer EP_IN failed");
 			goto err;
@@ -327,24 +388,23 @@ err:
 }
 
 /*
- * Ask synchronously the sensor for a full frame.
+ * Ask synchronously the sensor for a fingerprint.
  */
-static int sync_read_buffer_full(libusb_device_handle *dev, uint8_t *buf)
+static int dev_get_fp(libusb_device_handle *udev, uint8_t *buf)
 {
-	/* Full frame in once */
 	struct egis_msg msg;
 	int ret, i;
 
-	/* ??? meaning of these values? always same on tested device. */
-	msg_read_buffer(&msg, CMD_READ_BUF2, 0xF4, 0x02, 0x01, 0x64, 0x00); 
+	msg_get_fp(&msg, 0x01, 0xF4, 0x02, 0x01, 0x64);
 
-	ret = sync_transfer(dev, EP_OUT, &msg, MSG_HEADER_SIZE + 5);
+	ret = sync_transfer(udev, EP_OUT, &msg, MSG_HDR_SIZE + 5);
 	if (ret < 0) {
 		fp_err("sync_transfer EP_OUT failed");
 		goto err;
 	}
-	for (i = 0 ; i < FRAMEFULL_SIZE; i += ret) {
-		ret = sync_transfer(dev, EP_IN, (struct egis_msg *)(buf+i), FRAMEFULL_SIZE/* - i*/); 
+	for (i = 0 ; i < FRAMEFP_SIZE; i += ret) {
+		ret = sync_transfer(udev, EP_IN, (struct egis_msg *)(buf + i),
+				    FRAMEFP_SIZE - i);
 		if (ret < 0) {
 			fp_err("sync_transfer EP_IN failed");
 			goto err;
@@ -358,8 +418,9 @@ err:
 
 /*
  * Read synchronously a register from the sensor.
+ * Variadic argument pattern: int reg, int *val, ...
  */
-static int sync_read_registers(libusb_device_handle *dev, int n_args, ... /* int reg, int *val */)
+static int dev_get_regs(libusb_device_handle *udev, int n_args, ... )
 {
 	va_list ap;
 	struct egis_msg msg;
@@ -381,12 +442,12 @@ static int sync_read_registers(libusb_device_handle *dev, int n_args, ... /* int
 	}
 	va_end(ap);
 
-	ret = sync_transfer(dev, EP_OUT, &msg, MSG_HEADER_SIZE + 1 + n_args / 2);
+	ret = sync_transfer(udev, EP_OUT, &msg, MSG_HDR_SIZE + 1 + n_args / 2);
 	if (ret < 0) {
 		fp_err("sync_transfer EP_OUT failed");
 		goto err;
 	}
-	ret = sync_transfer(dev, EP_IN, &msg, sizeof(msg));
+	ret = sync_transfer(udev, EP_IN, &msg, sizeof(msg));
 	if (ret < 0) {
 		fp_err("sync_transfer EP_IN failed");
 		goto err;
@@ -416,8 +477,9 @@ err:
 
 /*
  * Write synchronously a register from the sensor.
+ * Variadic arguments are: int reg, int val, ...
  */
-static int sync_write_registers(libusb_device_handle *dev, int n_args, ... /*int reg, int val*/)
+static int dev_set_regs(libusb_device_handle *udev, int n_args, ...)
 {
 	va_list ap;
 	struct egis_msg msg;
@@ -439,12 +501,12 @@ static int sync_write_registers(libusb_device_handle *dev, int n_args, ... /*int
 	}
 	va_end(ap);
 
-	ret = sync_transfer(dev, EP_OUT, &msg, MSG_HEADER_SIZE + 1 + n_args);
+	ret = sync_transfer(udev, EP_OUT, &msg, MSG_HDR_SIZE + 1 + n_args);
 	if (ret < 0) {
 		fp_err("sync_transfer EP_OUT failed");
 		goto err;
 	}
-	ret = sync_transfer(dev, EP_IN, &msg, sizeof(msg));
+	ret = sync_transfer(udev, EP_IN, &msg, sizeof(msg));
 	if (ret < 0) {
 		fp_err("sync_transfer EP_IN failed");
 		goto err;
@@ -465,22 +527,24 @@ err:
 /*
  * Check the model of the sensor.
  */
-static int sensor_check(libusb_device_handle *dev)
+static int check_info(struct etes603_dev *dev)
 {
 	uint8_t reg_70, reg_71, reg_72, reg_73;
 
-	if (sync_read_registers(dev, 8, REG_INFO0, &reg_70, REG_INFO1, &reg_71,
-				REG_INFO2, &reg_72, REG_INFO3, &reg_73)) {
+	if (dev_get_regs(dev->udev, 8, REG_INFO0, &reg_70, REG_INFO1, &reg_71,
+		     REG_INFO2, &reg_72, REG_INFO3, &reg_73)) {
 		fp_err("cannot read device registers.");
 		goto err;
 	}
 
 	/* Check device */
-	if (reg_70 != 0x4A || reg_71 != 0x44 || reg_72 != 0x49 || reg_73 != 0x31) {
+	if (reg_70 != 0x4A || reg_71 != 0x44 || reg_72 != 0x49
+	    || reg_73 != 0x31) {
 		fp_err("unknown device parameters (REG_70:%02X REG_71:%02X "
 		       "REG_FIRMWARE:%02X REG_VERSION:%02X)",
 		       reg_70, reg_71, reg_72, reg_73);
-		/* TODO does not make it fails the time found all compatible devices. */
+		/* TODO Don't make it fails the time found all compatible
+		 * devices. */
 		/* goto err; */
 	}
 	return 0;
@@ -491,7 +555,7 @@ err:
 /*
  * Ask command 0x20 to the sensor.
  */
-static int sensor_get_cmd20(libusb_device_handle *dev)
+static int get_cmd20(struct etes603_dev *dev)
 {
 	struct egis_msg msg;
 	int ret;
@@ -499,12 +563,12 @@ static int sensor_get_cmd20(libusb_device_handle *dev)
 	msg_header_prepare(&msg);
 	msg.cmd = CMD_20;
 
-	ret = sync_transfer(dev, EP_OUT, &msg, MSG_HEADER_SIZE);
+	ret = sync_transfer(dev->udev, EP_OUT, &msg, MSG_HDR_SIZE);
 	if (ret < 0) {
 		fp_err("sync_transfer EP_OUT failed");
 		goto err;
 	}
-	ret = sync_transfer(dev, EP_IN, &msg, sizeof(msg));
+	ret = sync_transfer(dev->udev, EP_IN, &msg, sizeof(msg));
 	if (ret < 0) {
 		fp_err("sync_transfer EP_IN failed");
 		goto err;
@@ -513,12 +577,12 @@ static int sensor_get_cmd20(libusb_device_handle *dev)
 		fp_err("msg_header_check failed");
 		goto err;
 	}
-	/* TODO is it status or flashtype/flashinfo or ? */
+	/* status or flashtype/flashinfo or ? */
 	if (msg.cmd != 0x05
 	    || msg.sige_misc.val[0] != 0x00
 	    || msg.sige_misc.val[1] != 0x00) {
-		fp_warn("unexpected answer CMD_20 from device (%02X %02X %02X)", msg.cmd,
-			msg.sige_misc.val[0], msg.sige_misc.val[1]);
+		fp_warn("unexpected answer CMD_20 from device(%02X %02X %02X)",
+			msg.cmd, msg.sige_misc.val[0], msg.sige_misc.val[1]);
 	}
 
 	return 0;
@@ -529,7 +593,7 @@ err:
 /*
  * Ask command 0x25 to the sensor.
  */
-static int sensor_get_cmd25(libusb_device_handle *dev)
+static int get_cmd25(struct etes603_dev *dev)
 {
 	struct egis_msg msg;
 	int ret;
@@ -537,12 +601,12 @@ static int sensor_get_cmd25(libusb_device_handle *dev)
 	msg_header_prepare(&msg);
 	msg.cmd = CMD_25;
 
-	ret = sync_transfer(dev, EP_OUT, &msg, MSG_HEADER_SIZE);
+	ret = sync_transfer(dev->udev, EP_OUT, &msg, MSG_HDR_SIZE);
 	if (ret < 0) {
 		fp_err("sync_transfer EP_OUT failed");
 		goto err;
 	}
-	ret = sync_transfer(dev, EP_IN, &msg, sizeof(msg));
+	ret = sync_transfer(dev->udev, EP_IN, &msg, sizeof(msg));
 	if (ret < 0) {
 		fp_err("sync_transfer EP_IN failed");
 		goto err;
@@ -555,9 +619,10 @@ static int sensor_get_cmd25(libusb_device_handle *dev)
 		fp_err("CMD_OK failed");
 		goto err;
 	}
-	/* TODO is it flashtype or status or ? */
+	/* flashtype or status or ? */
 	if (msg.sige_misc.val[0] != 0x00) {
-		fp_warn("unexpected answer for CMD_25 (%02X)", msg.sige_misc.val[0]);
+		fp_warn("unexpected answer for CMD_25 (%02X)",
+			msg.sige_misc.val[0]);
 	}
 	return 0;
 err:
@@ -567,7 +632,9 @@ err:
 /*
  * Ask command 0x60 to the sensor.
  */
-static int sensor_get_cmd60(libusb_device_handle *dev, uint8_t cmd, uint8_t val, uint8_t *reg)
+__attribute__((used))
+static int get_cmd60(struct etes603_dev *dev, uint8_t cmd, uint8_t val,
+	uint8_t *reg)
 {
 	struct egis_msg msg;
 	int ret;
@@ -578,39 +645,41 @@ static int sensor_get_cmd60(libusb_device_handle *dev, uint8_t cmd, uint8_t val,
 	msg.sige_misc.val[0] = cmd;
 	msg.sige_misc.val[1] = val;
 
-	ret = sync_transfer(dev, EP_OUT, &msg, MSG_HEADER_SIZE + cmd - 1);
+	ret = sync_transfer(dev->udev, EP_OUT, &msg, MSG_HDR_SIZE + cmd - 1);
 	if (ret < 0) {
 		fp_err("sync_transfer EP_OUT failed");
-		goto err;
+		goto err_io;
 	}
-	ret = sync_transfer(dev, EP_IN, &msg, sizeof(msg));
+	ret = sync_transfer(dev->udev, EP_IN, &msg, sizeof(msg));
 	if (ret < 0) {
 		fp_err("sync_transfer EP_IN failed");
-		goto err;
+		goto err_io;
 	}
 	if (msg_header_check(&msg)) {
 		fp_err("msg_header_check failed");
-		goto err;
+		goto err_cmd;
 	}
 	if (msg.cmd != CMD_OK) {
 		fp_err("CMD_OK failed");
-		goto err;
+		goto err_cmd;
 	}
 	/* Read cmd, so set read value to reg */
 	if (cmd == 1 && reg != NULL) {
 		*reg = msg.sige_misc.val[0];
 	}
 	return 0;
-err:
+err_io:
 	return -1;
+err_cmd:
+	return -2;
 }
 
 /*
  * Change the mode of the sensor.
  */
-static int sync_write_mode_control(libusb_device_handle *dev, uint8_t mode)
+static int set_mode_control(struct etes603_dev *dev, uint8_t mode)
 {
-	if (sync_write_registers(dev, 2, REG_MODE_CONTROL, mode))
+	if (dev_set_regs(dev->udev, 2, REG_MODE_CONTROL, mode))
 		return -1;
 	return 0;
 }
@@ -618,25 +687,25 @@ static int sync_write_mode_control(libusb_device_handle *dev, uint8_t mode)
 /*
  * Initialize the sensor by setting some registers.
  */
-static int init_sensor(libusb_device_handle *dev)
+static int init(struct etes603_dev *dev)
 {
-	if (sync_write_mode_control(dev, REG_MODE_SLEEP))
+	if (set_mode_control(dev, REG_MODE_SLEEP))
 		return -1;
-	if (sync_write_registers(dev, 2, REG_50, 0x0F))
+	if (dev_set_regs(dev->udev, 2, REG_50, 0x0F))
 		return -2;
-	if (sync_write_registers(dev, 2, REG_GAIN, 0x04))
+	if (dev_set_regs(dev->udev, 2, REG_GAIN, 0x04))
 		return -3;
-	if (sync_write_registers(dev, 2, REG_VRT, 0x08))
+	if (dev_set_regs(dev->udev, 2, REG_VRT, 0x08))
 		return -4;
-	if (sync_write_registers(dev, 2, REG_VRB, 0x0D))
+	if (dev_set_regs(dev->udev, 2, REG_VRB, 0x0D))
 		return -5;
-	if (sync_write_registers(dev, 2, REG_VCO_CONTROL, 0x14))
+	if (dev_set_regs(dev->udev, 2, REG_VCO_CONTROL, REG_VCO_RT))
 		return -6;
-	if (sync_write_registers(dev, 2, REG_DCOFFSET, 0x36))
+	if (dev_set_regs(dev->udev, 2, REG_DCOFFSET, 0x36))
 		return -7;
-	if (sync_write_registers(dev, 2, REG_F0, 0x00))
+	if (dev_set_regs(dev->udev, 2, REG_F0, 0x00))
 		return -8;
-	if (sync_write_registers(dev, 2, REG_F2, 0x00))
+	if (dev_set_regs(dev->udev, 2, REG_F2, 0x00))
 		return -9;
 	return 0;
 }
@@ -644,13 +713,13 @@ static int init_sensor(libusb_device_handle *dev)
 /*
  * This function sets encryption registers to no encryption.
  */
-static int init_enc(libusb_device_handle *dev)
+static int init_enc(struct etes603_dev *dev)
 {
 	/* Initialize encryption. */
-	/* set register from 0x41 to 0x48 (0x8 regs) */
-	if (sync_write_registers(dev, 16, 
-			REG_ENC1, 0x12, REG_ENC2, 0x34, REG_ENC3, 0x56, REG_ENC4, 0x78, 
-			REG_ENC5, 0x90, REG_ENC6, 0xAB,	REG_ENC7, 0xCD, REG_ENC8, 0xEF)) {
+	/* Set registers from 0x41 to 0x48 (0x8 regs) */
+	if (dev_set_regs(dev->udev, 16, REG_ENC1, 0x12, REG_ENC2, 0x34,
+		     REG_ENC3, 0x56, REG_ENC4, 0x78, REG_ENC5, 0x90,
+		     REG_ENC6, 0xAB, REG_ENC7, 0xCD, REG_ENC8, 0xEF)) {
 		fp_err("Failed");
 		return -1;
 	}
@@ -660,16 +729,16 @@ static int init_enc(libusb_device_handle *dev)
 /*
  * This function set registers 0x20 to 0x37 to default values.
  */
-static int init_regs(libusb_device_handle *dev)
+static int init_regs(struct etes603_dev *dev)
 {
-	/* set register from 0x20 to 0x37 (0x18 regs) */
-	if (sync_write_registers(dev, 48,
-			REG_20, 0x00, REG_21, 0x23, REG_22, 0x21, REG_23, 0x20,
-			REG_24, 0x14, REG_25, 0x6A, REG_26, 0x00, REG_27, 0x00,
-			REG_28, 0x00, REG_29, 0xC0, REG_2A, 0x50, REG_2B, 0x50,
-			REG_2C, 0x4D, REG_2D, 0x03, REG_2E, 0x06, REG_2F, 0x06,
-			REG_30, 0x10, REG_31, 0x02, REG_32, 0x14, REG_33, 0x34,
-			REG_34, 0x01, REG_35, 0x08, REG_36, 0x03, REG_37, 0x21)) {
+	/* Set register from 0x20 to 0x37 (0x18 regs) */
+	if (dev_set_regs(dev->udev, 48,
+		     REG_20, 0x00, REG_21, 0x23, REG_22, 0x21, REG_23, 0x20,
+		     REG_24, 0x14, REG_25, 0x6A, REG_26, 0x00, REG_27, 0x00,
+		     REG_28, 0x00, REG_29, 0xC0, REG_2A, 0x50, REG_2B, 0x50,
+		     REG_2C, 0x4D, REG_2D, 0x03, REG_2E, 0x06, REG_2F, 0x06,
+		     REG_30, 0x10, REG_31, 0x02, REG_32, 0x14, REG_33, 0x34,
+		     REG_34, 0x01, REG_35, 0x08, REG_36, 0x03, REG_37, 0x21)) {
 		fp_err("Failed");
 		return -1;
 	}
@@ -677,29 +746,34 @@ static int init_regs(libusb_device_handle *dev)
 }
 
 /*
- * This function tunes the DCoffset value and adjusts the gain value if required.
+ * This function tunes the DCoffset value and adjusts the gain value if
+ * required.
  */
-static int tune_dc(libusb_device_handle *dev)
+static int tune_dc(struct etes603_dev *dev)
 {
 	uint8_t buf[FRAME_SIZE];
 	uint8_t min, max;
 	uint8_t dcoffset, gain;
-	//uint8_t reg_e0, reg_e1, reg_e2;
 
-	/* The default gain should work but reduces it if reach dcoffset limit  */
+	fp_dbg("Tuning DCoffset");
+	/* TODO To get better results, tuning must be done 3 times as in
+	 * captured traffic to make sure that the value is correct. */
+	/* The default gain should work but it may reach a DCOffset limit so in this
+	 * case we decrease the gain. */
 	for (gain = GAIN_SMALL_INIT; ; gain--) {
 		min = DCOFFSET_MIN;
 		max = DCOFFSET_MAX;
-
-		/* dichotomic search to find at which value the frame become almost black. */
+		/* Dichotomic search to find at which value the frame becomes
+		 * almost black. */
 		while (min + 1 < max) {
 			dcoffset = (max + min) / 2;
-			if (sync_write_registers(dev, 2, REG_DCOFFSET, dcoffset))
+			fp_dbg("Testing DCoffset=0x%02X Gain=0x%02X", dcoffset, gain);
+			if (dev_set_regs(dev->udev, 2, REG_DCOFFSET, dcoffset))
 				goto err_tunedc;
-			/* 0x15 0x10 are constant in all frames. */
-			if (sync_read_buffer(dev, 0xC0, 0x01, gain, 0x15, 0x10, buf))
+			/* vrt:0x15 vrb:0x10 are constant in all tuning frames. */
+			if (dev_get_frame(dev->udev, FRAME_WIDTH, 0x01, gain, 0x15, 0x10, buf))
 				goto err_tunedc;
-			if (process_frame_empty(buf, 0))
+			if (process_frame_empty(buf, FRAME_SIZE, 0))
 				max = dcoffset;
 			else
 				min = dcoffset;
@@ -709,224 +783,217 @@ static int tune_dc(libusb_device_handle *dev)
 			break;
 		}
 	}
-	fp_dbg("DCoffset=0x%02X Gain=0x%02X", dcoffset, gain);
-	/* Set registers */
+	fp_dbg("-> DCoffset=0x%02X Gain=0x%02X", dcoffset, gain);
+	dev->gain = gain;
+	dev->dcoffset = dcoffset;
+
 	/* ??? how reg21 / reg22 are calculated */
-	if (sync_write_registers(dev, 4, REG_21, 0x23, REG_22, 0x21))
+	if (dev_set_regs(dev->udev, 4, REG_21, 0x23, REG_22, 0x21))
 		goto err_write;
-	if (sync_write_registers(dev, 2, REG_GAIN, gain))
+	if (dev_set_regs(dev->udev, 2, REG_GAIN, gain))
 		goto err_write;
-	if (sync_write_registers(dev, 2, REG_DCOFFSET, dcoffset))
+	if (dev_set_regs(dev->udev, 2, REG_DCOFFSET, dcoffset))
 		goto err_write;
-	
-	/* This read happens in captured traffic but is it used? */
-	//sync_read_registers(dev, 6, REG_GAIN, &reg_e0, REG_VRT, &reg_e1, REG_VRB, &reg_e2);
+	/* In captured traffic, read REG_GAIN, REG_VRT, and REG_VRB registers. */
 
 	return 0;
 err_tunedc:
 	fp_err("Error tuning DC/gain parameter");
 	return -1;
 err_write:
-	fp_err("Error setting DC/gain registers");
+	fp_err("Error setting registers");
 	return -2;
 }
 
 /*
  * This function tunes the value for DTVRT and adjusts DCOFFSET if needed.
  */
-static int tune_dtvrt(libusb_device_handle *dev)
+static int tune_dtvrt(struct etes603_dev *dev)
 {
-	uint8_t dcoffset;
 	uint8_t reg_e5;
 	uint8_t reg_50, reg_51;
 	uint8_t reg_59, reg_5a, reg_5b;
-
 	uint8_t dtvrt;
+	uint8_t dcoffset_ct;
 
-	/* Read DCoffset, it is not done in traces but need it (no global save of registers). */
-	if (sync_read_registers(dev, 2, REG_DCOFFSET, &dcoffset))
-		goto err_read;
+	assert(dev->dcoffset);
+	/* Use DCOffset for frame capture as default. */
+	dcoffset_ct = dev->dcoffset;
 
 	/* Save registers to reset it at the end. */
-	if (sync_read_registers(dev, 2, REG_VCO_CONTROL, &reg_e5)) /* 0x13 */
-		goto err_read;
-	if (sync_read_registers(dev, 4, REG_50, &reg_50, REG_51, &reg_51)) /* 0x0F 0x32 */
-		goto err_read;
-	if (sync_read_registers(dev, 6, REG_59, &reg_59, REG_5A, &reg_5a, REG_5B, &reg_5b)) /* 0x18 0x08 0x10 */
-		goto err_read;
+	if (dev_get_regs(dev->udev, 2, REG_VCO_CONTROL, &reg_e5))
+		goto err_rw;
+	if (dev_get_regs(dev->udev, 4, REG_50, &reg_50, REG_51, &reg_51))
+		goto err_rw;
+	if (dev_get_regs(dev->udev, 6, REG_59, &reg_59, REG_5A, &reg_5a, REG_5B, &reg_5b))
+		goto err_rw;
 
-	if (sync_write_mode_control(dev, REG_MODE_SLEEP))
-		goto err_write;
-	/* In traces, REG_DCOFFSET is set but not required. */
-	if (sync_write_registers(dev, 2, REG_VCO_CONTROL, 0x13)) /* always 0x13 */
-		goto err_write;
-	if (sync_write_registers(dev, 2, REG_50, 0x8F)) /* reg_50 | 0x80  */
-		goto err_write;
-	if (sync_write_registers(dev, 2, REG_51, 0x31)) /* reg_51 & 0xF7 ? */
-		goto err_write;
-	if (sync_write_registers(dev, 6, REG_59, 0x18, REG_5A, 0x08, REG_5B, 0x00)) /* always 0x18 */
-		goto err_write;
+restart:
+	if (set_mode_control(dev, REG_MODE_SLEEP))
+		goto err_rw;
+	if (dev_set_regs(dev->udev, 2, REG_DCOFFSET, dcoffset_ct))
+		goto err_rw;
+	if (dev_set_regs(dev->udev, 2, REG_VCO_CONTROL, REG_VCO_IDLE))
+		goto err_rw;
+	if (dev_set_regs(dev->udev, 2, REG_50, reg_50 | 0x80))
+		goto err_rw;
+	if (dev_set_regs(dev->udev, 2, REG_51, reg_51 & 0xF7))
+		goto err_rw;
+	if (dev_set_regs(dev->udev, 6, REG_59, 0x18, REG_5A, 0x08, REG_5B, 0x00))
+		goto err_rw;
 
-	if (sync_write_mode_control(dev, REG_MODE_CONTACT))
-		goto err_write;
+	if (set_mode_control(dev, REG_MODE_CONTACT))
+		goto err_rw;
 
-	/* DTVRT Tuning */
+	fp_dbg("Tuning of DTVRT");
 	dtvrt = DTVRT_MAX;
-	if (sync_write_registers(dev, 2, REG_DTVRT, dtvrt))
+	if (dev_set_regs(dev->udev, 2, REG_DTVRT, dtvrt))
 		goto err_tune;
-	/* Arbitrary lowest value for dcoffet */
-	while (!contact_detect(dev) && dcoffset > 0x10) {
+	/* Arbitrary lowest value for DCOffset. */
+	while (!contact_detect(dev) && dcoffset_ct > 0x10) {
 		if (dtvrt > 5) {
 			dtvrt -= 5;
-		} else if (dtvrt > 1) {
-			/* This does not happen in captured frames */
-			dtvrt -= 1;
 		} else {
-			/* Decrease DCoffset if cannot adjust a value for DTVRT */
-			dcoffset--;
-			dtvrt = DTVRT_MAX;
-			fp_dbg("Decrease DCoffset=0x%02X to tune DTVRT", dcoffset);
-			if (sync_write_registers(dev, 2, REG_DCOFFSET, dcoffset))
-				goto err_tune;
+			/* Decrease DCoffset if cannot adjust a value for
+			 * DTVRT. */
+			dcoffset_ct--;
+			fp_dbg("Decrease DCoffset=0x%02X for contact "
+				"detection (DTVRT)", dcoffset_ct);
+			goto restart;
 		}
-		if (sync_write_registers(dev, 2, REG_DTVRT, dtvrt))
+		fp_dbg("Testing DTVRT=0x%02X DCoffset=0x%02X", dtvrt, dcoffset_ct);
+		if (dev_set_regs(dev->udev, 2, REG_DTVRT, dtvrt))
 			goto err_tune;
 	}
-	fp_dbg("DTVRT=0x%02X DCoffset=0x%02X", dtvrt, dcoffset);
+	dtvrt += 5;
+	fp_dbg("-> DTVRT=0x%02X DCoffset=0x%02X", dtvrt, dcoffset_ct);
+	dev->dtvrt = dtvrt;
+	dev->dcoffset_ct = dcoffset_ct;
 
-	if (sync_write_mode_control(dev, REG_MODE_SLEEP))
-		goto err_write;
-
-	/* Reset values of registers, saved at the beginning of this function. */
-	if (sync_write_registers(dev, 2, REG_VCO_CONTROL, 0x13))
-		goto err_write;
-	if (sync_write_registers(dev, 4, REG_50, 0x0F, REG_51, 0x32))
-		goto err_write;
-	if (sync_write_registers(dev, 6, REG_59, 0x18, REG_5A, 0x08, REG_5B, 0x10))
-		goto err_write;
-	/* Set value found for DTVRT */
-	if (sync_write_registers(dev, 2, REG_DTVRT, dtvrt))
-		goto err_write;
+	if (set_mode_control(dev, REG_MODE_SLEEP))
+		goto err_rw;
+	/* Reset registers value from initial values. */
+	if (dev_set_regs(dev->udev, 2, REG_VCO_CONTROL, reg_e5))
+		goto err_rw;
+	if (dev_set_regs(dev->udev, 4, REG_50, reg_50, REG_51, reg_51))
+		goto err_rw;
+	if (dev_set_regs(dev->udev, 6, REG_59, reg_59, REG_5A, reg_5a, REG_5B, reg_5b))
+		goto err_rw;
+	/* Reset DCOffset for frame capturing. */
+	if (dev_set_regs(dev->udev, 2, REG_DCOFFSET, dev->dcoffset))
+		goto err_rw;
+	/* Set value found for DTVRT. */
+	if (dev_set_regs(dev->udev, 2, REG_DTVRT, dtvrt))
+		goto err_rw;
 
 	return 0;
-err_read:
-	fp_err("cannot read registers");
+err_rw:
+	fp_err("cannot read/write registers");
 	return -1;
-err_write:
-	fp_err("cannot write registers");
-	return -2;
 err_tune:
 	fp_err("error tuning DTVRT/DCoffset (cannot write registers)");
-	return -3;
+	return -2;
 }
 
 /*
  * Tune value of VRT and VRB for contrast and brightness.
  */
-static int tune_vrb(libusb_device_handle *dev)
+static int tune_vrb(struct etes603_dev *dev)
 {
+	static const unsigned int BW = 0x08; /* Border width*/
+	static const unsigned int FBW = FRAME_WIDTH / 2; /* Frame byte width */
 	uint8_t buf[FRAME_SIZE];
-	/*reg_e1 = vrt*/
-	/* VRT=0x0A and VRB=0x10 are starting values */
-	/* vrt_max=0x3F  vrb_max=0x3A */
-	uint8_t reg_e0, reg_e1 = 0x0A, reg_e2 = 0x10, reg_e6;
-	int i, j;
+	/* VRT(reg E1)=0x0A and VRB(reg E2)=0x10 are starting values */
+	/* reg_e0 = 0x23 is sensor normal/small gain */
+	uint8_t reg_gain, reg_vrt = 0x0A, reg_vrb = 0x10, reg_dc;
+	unsigned int i, j;
 	double hist[16];
 	double white_mean, black_mean;
 
-#ifdef DUMP_CALIBRATE
-	FILE *f;
-	f = fopen("calibrate.bin", "w");
-#endif
-	fp_dbg("Experimental tuning of VRT/VRB");
+	fp_dbg("Tuning of VRT/VRB");
 
-	if (sync_read_registers(dev, 2, REG_GAIN, &reg_e0))
+	if (dev_get_regs(dev->udev, 2, REG_GAIN, &reg_gain))
 		goto err;
 
-	/* Reduce DCoffset by 1 */
-	/* TODO is it required? or my DCoffset tuning is wrong? */
-	if (sync_read_registers(dev, 2, REG_DCOFFSET, &reg_e6))
+	/* Reduce DCoffset by 1 to allow tuning */
+	if (dev_get_regs(dev->udev, 2, REG_DCOFFSET, &reg_dc))
 		goto err;
-	if (sync_write_registers(dev, 2, REG_DCOFFSET, reg_e6-1))
+	if (dev_set_regs(dev->udev, 2, REG_DCOFFSET, reg_dc - 1))
 		goto err;
 
-	while (reg_e1 < 0x16 && reg_e2 < 0x1a) {
-		fp_dbg("Testing VRT=0x%02X VRB=0x%02X values", reg_e1, reg_e2);	
+	while (reg_vrt < VRT_MAX && reg_vrb < VRB_MAX) {
+		fp_dbg("Testing VRT=0x%02X VRB=0x%02X", reg_vrt, reg_vrb);
 		/* Clean histogram */
 		for (i = 0; i < 16; i++)
 			hist[i] = 0.0;
-
-		/* Capture frame */
-		if (sync_read_buffer(dev, 0xC0, 0x01, reg_e0, reg_e1, reg_e2, buf)) /* reg_e0=0x23 is in_sensor_normal_gain/in_sensor_small_gain */
+		if (dev_get_frame(dev->udev, FRAME_WIDTH, 0x01, reg_gain,
+				  reg_vrt, reg_vrb, buf))
 			goto err;
-#ifdef DUMP_CALIBRATE
-		fwrite(buf, 1, 384, f);
-#endif
-		/* fill up histogram, 4 rows of the frame */
-		for (j = 0; j < 4; j++) {
+		/* fill up histogram using 4 rows of the frame */
+		for (j = 0; j < FRAME_HEIGHT; j++) {
 			/* only center pixels (0x50 pixels) */
-			for (i = 0x08 + j * 0x60; i < 0x58 + j * 0x60; i++)
+			for (i = BW + j * FBW; i < FBW - BW + j * FBW; i++)
 				hist[buf[i] >> 4]++;
 		}
 		/* histogram average */
 		for (i = 0; i < 16; i++) {
-			hist[i] = hist[i] / (0x50*4);
+			hist[i] = hist[i] / ((FBW - BW * 2) * FRAME_HEIGHT);
 		}
-		/* average black/white pixels (full black and full white excluded) */
+		/* Average black/white pixels (full black and full white pixels
+		 * are excluded). */
 		black_mean = white_mean = 0.0;
 		for (i = 1; i < 8; i++)
 			black_mean += hist[i];
 		for (i = 8; i < 15; i++)
 			white_mean += hist[i];
-		fp_dbg("fullblack=%6f black=%6f grey=%6f white=%6f fullwhite=%6f", hist[0], black_mean, black_mean+white_mean, white_mean, hist[15]);
+		fp_dbg("fullb=%6f black=%6f grey=%6f white=%6f fullw=%6f",
+			hist[0], black_mean, black_mean+white_mean, white_mean,
+			hist[15]);
 
 		/* Tuning VRT/VRB -> contrast and brightness */
 		if (hist[0] + black_mean > 0.95) {
-			fp_dbg("Image is too dark, reduce DCoffset?");
-			break;
-			//reg_e6--;
-			//sync_write_registers(dev, 2, REG_DCOFFSET, reg_e6-1);
+			fp_dbg("Image is too dark, reducing DCoffset");
+			reg_dc--;
+			dev_set_regs(dev->udev, 2, REG_DCOFFSET, reg_dc-1);
+			//break;
 		}
 		if (hist[15] > 0.95) {
-			fp_dbg("Image is too bright, what to do?");
+			fp_dbg("Image is too bright, trying increase DCoffset");
+			reg_dc++;
+			dev_set_regs(dev->udev, 2, REG_DCOFFSET, reg_dc-1);
+			//break;
 		}
 		if ((black_mean > 0.1) && (white_mean > 0.1) && (black_mean + white_mean > 0.4)) {
 			/* The image seems balanced. */
 			break;
 		}
-		//if (vrt >= 2*vrb - 0x0a) { vrt++; vrb++; } else { vrt++; }
-		if (reg_e1 >= 2 * reg_e2 - 0x0a) {
-			reg_e1++; reg_e2++;
+		if (reg_vrt >= 2 * reg_vrb - 0x0a) {
+			reg_vrt++; reg_vrb++;
 		} else {
-			reg_e1++;
+			reg_vrt++;
 		}
 		/* Check maximum for vrt/vrb */
 		/* TODO if maximum is reached, leave with an error? */
-		if (reg_e1 > 0x3f) /* vrt_max = 0x3f */
-			reg_e1 = 0x3f;
-		if (reg_e2 > 0x3a) /* vrb_max = 0x3a */
-			reg_e2 = 0x3a;
+		if (reg_vrt > VRT_MAX)
+			reg_vrt = VRT_MAX;
+		if (reg_vrb > VRB_MAX)
+			reg_vrb = VRB_MAX;
 
 	}
-	fp_dbg("VRT VRB values are not corrected with tuning, set to fixed values");
-	/* should found value vrt=0x16 vrb=0x19 */
-	//reg_e1 = 0x16; reg_e2 = 0x19;
-	
-#ifdef DUMP_CALIBRATE
-	fclose(f);
-#endif
-	/* vrt_max=0x3F  vrb_max=0x3A */
-	/* Reset the DCOffset */
-	if (sync_write_registers(dev, 2, REG_DCOFFSET, reg_e6))
-		goto err;
+	fp_dbg("-> VRT=0x%02X VRB=0x%02X", reg_vrt, reg_vrb);
+	dev->vrt = reg_vrt;
+	dev->vrb = reg_vrb;
 
-	/* In traces, REG_26/REG_27 are set, purpose? values? */
-	//sync_write_registers(dev, 4, REG_26, 0x11, REG_27, 0x00);
-	/* Set Gain/VRT/VRB values found */
-	if (sync_write_registers(dev, 6, REG_GAIN, reg_e0, REG_VRT, reg_e1, REG_VRB, reg_e2))
+	/* Reset the DCOffset */
+	if (dev_set_regs(dev->udev, 2, REG_DCOFFSET, reg_dc))
 		goto err;
-	/* In traces, it is read again, why? */
-	//sync_read_registers(dev, 6, REG_GAIN, &reg_e0, REG_VRT, &reg_e1, REG_VRB, &reg_e2); /* 0x23 0x0B 0x11 */
+	/* In traces, REG_26/REG_27 are set. purpose? values? */
+	if (dev_set_regs(dev->udev, 4, REG_26, 0x11, REG_27, 0x00))
+		goto err;
+	/* Set Gain/VRT/VRB values found */
+	if (dev_set_regs(dev->udev, 6, REG_GAIN, reg_gain, REG_VRT, reg_vrt, REG_VRB, reg_vrb))
+		goto err;
+	/* In traces, Gain/VRT/VRB are read again. */
 
 	return 0;
 err:
@@ -935,132 +1002,129 @@ err:
 }
 
 /*
- * This functions sets registers with tunned values.
- * TODO probably not required at all
+ * Retrieve a frame (synchronous function).
  */
-static int check_regs(libusb_device_handle *dev)
+static int frame_capture(struct etes603_dev *dev, uint8_t *buf)
 {
-	/* In traces, registers are set once again. */
-//	sync_write_registers(dev, 2, REG_GAIN, 0x23); /* from tune_vrb */
-//	sync_write_registers(dev, 2, REG_VRT, 0x0B); /* from tune_vrb */
-//	sync_write_registers(dev, 2, REG_VRB, 0x11); /* from tune_vrb */
-//	sync_write_registers(dev, 2, REG_DTVRT, 0x08); /* from tune_dtvrt */
-//	sync_write_registers(dev, 2, REG_DCOFFSET, 0x31); /* from tune_dc but could be modified in tune_dtvrt */
-//	sync_write_registers(dev, 2, REG_21, 0x23); /* from tune_dc */
-//	sync_write_registers(dev, 2, REG_26, 0x11); /* from tune_vrb */
-	return 0;
+	/* Note that the length parameter can be changed but 0xC0 is the best value */
+	return dev_get_frame(dev->udev, FRAME_WIDTH, 0x00, 0x00, 0x00, 0x00, buf);
 }
 
-static int sensor_realtime(libusb_device_handle *dev)
+/*
+ * Prepare the sensor to capture a frame.
+ */
+static int frame_prepare_capture(struct etes603_dev *dev)
 {
-	/* TODO Set parameter found for realtime */
-	if (sync_write_mode_control(dev, REG_MODE_SLEEP))
+	assert(dev->dcoffset && dev->gain && dev->vrt && dev->vrb);
+	if (set_mode_control(dev, REG_MODE_SLEEP))
 		return -1;
-//	if (sync_write_registers(dev, 2, REG_DCOFFSET, 0x32)) /* DCOffset */
-//		return -2;
-//	if (sync_write_registers(dev, 6, REG_GAIN, 0x23, REG_VRT, 0x0C, REG_VRB, 0x12)) /* Gain 23, VRT 0c, VRB 12 */
-//		return -3;
-	/* Set to Realtime mode (0x14). */
-	if (sync_write_registers(dev, 2, REG_VCO_CONTROL, 0x14))
-		return -4;
-	return 0;
-}
-
-static int frame_configure(libusb_device_handle *dev)
-{
-	/* REG_04 frame configuration */
-	return sync_write_registers(dev, 2, REG_04, 0x00);
-}
-
-static int frame_capture(libusb_device_handle *dev, uint8_t *buf)
-{
-	return sync_read_buffer(dev, 0xC0, 0x00, 0x00, 0x00, 0x00, buf);
-}
-
-static int frame_prepare_capture(libusb_device_handle *dev)
-{
-	if (sensor_realtime(dev))
+	/* Set tuned realtime configuration. */
+	if (dev_set_regs(dev->udev, 2, REG_DCOFFSET, dev->dcoffset))
 		return -2;
-	if (frame_configure(dev))
+	if (dev_set_regs(dev->udev, 6, REG_GAIN, dev->gain, REG_VRT, dev->vrt, REG_VRB, dev->vrb))
 		return -3;
-	if (sync_write_mode_control(dev, REG_MODE_SENSOR))
+	/* Set the sensor to realtime capturing (0x14). */
+	if (dev_set_regs(dev->udev, 2, REG_VCO_CONTROL, REG_VCO_RT))
 		return -4;
+	/* REG_04 is frame configuration */
+	if (dev_set_regs(dev->udev, 2, REG_04, 0x00))
+		return -5;
+	if (set_mode_control(dev, REG_MODE_SENSOR))
+		return -6;
 	return 0;
 }
 
-static int frame_full_configure(libusb_device_handle *dev)
+/*
+ * Prepare the sensor to capture a fingerprint image.
+ */
+static int fp_configure(struct etes603_dev *dev)
 {
-	/* REG_10 is required to get a good full frame (exact meaning?) */
-	return sync_write_registers(dev, 2, REG_10, 0x92);
+	/* REG_10 is required to get a good fingerprint frame (exact meaning?) */
+	return dev_set_regs(dev->udev, 2, REG_10, 0x92);
 }
 
 
 /*
  * This function opens the sensor and initialize it.
+ * Returns NULL on error.
  */
-static int sensor_open(libusb_device_handle *dev)
+static struct etes603_dev *sensor_open(libusb_device_handle *udev)
 {
 	int ret;
+	struct etes603_dev *dev;
 
-	if ((ret = sensor_check(dev)) != 0) {
-		fp_err("sensor_check failed (err=%d)", ret);
-		goto err;
+	if ((dev = malloc(sizeof(struct etes603_dev))) == NULL) {
+		fp_err("cannot allocate memory");
+		return NULL;
 	}
-	if ((ret = sensor_get_cmd20(dev)) != 0) {
-		fp_err("sensor_get_cmd20 failed (err=%d)", ret);
-		goto err;
+
+	dev->udev = udev;
+	if ((dev->braw = malloc(FRAME_SIZE * 1000)) == NULL) {
+		fp_err("cannot allocate memory");
+		goto err_free_dev;
 	}
-	if ((ret = sensor_get_cmd25(dev)) != 0) {
-		fp_err("sensor_get_cmd25 failed (err=%d)", ret);
-		goto err;
+	dev->braw_end = dev->braw + (FRAME_SIZE * 1000);
+	dev->braw_cur = dev->braw;
+
+	if ((ret = check_info(dev)) != 0) {
+		fp_err("check_info failed (err=%d)", ret);
+		goto err_free_buffer;
 	}
-	if ((ret = init_sensor(dev)) != 0) {
-		fp_err("init_sensor failed (err=%d)", ret);
-		goto err;
+	if ((ret = get_cmd20(dev)) != 0) {
+		fp_err("get_cmd20 failed (err=%d)", ret);
+		goto err_free_buffer;
+	}
+	if ((ret = get_cmd25(dev)) != 0) {
+		fp_err("get_cmd25 failed (err=%d)", ret);
+		goto err_free_buffer;
+	}
+	if ((ret = init(dev)) != 0) {
+		fp_err("init failed (err=%d)", ret);
+		goto err_free_buffer;
 	}
 	if ((ret = init_enc(dev)) != 0) {
 		fp_err("init_enc failed (err=%d)", ret);
-		goto err;
+		goto err_free_buffer;
 	}
 	if ((ret = init_regs(dev)) != 0) {
 		fp_err("init_regs failed (err=%d)", ret);
-		goto err;
+		goto err_free_buffer;
 	}
 	if ((ret = tune_dc(dev)) != 0) {
 		fp_err("tune_dc failed (err=%d)", ret);
-		goto err;
+		goto err_free_buffer;
 	}
 	if ((ret = tune_dtvrt(dev)) != 0) {
 		fp_err("tune_dtvrt failed (err=%d)", ret);
-		goto err;
+		goto err_free_buffer;
 	}
 	if ((ret = tune_vrb(dev)) != 0) {
 		fp_err("tune_vrb failed (err=%d)", ret);
-		goto err;
+		goto err_free_buffer;
 	}
-	if ((ret = check_regs(dev)) != 0) {
-		fp_err("check_regs failed (err=%d)", ret);
-		goto err;
-	}
-	/* Configure full frame (set register value for this session) */
-	if ((ret = frame_full_configure(dev)) != 0) {
-		fp_err("frame_full_configure failed (err=%d)", ret);
-		goto err;
+	/* Configure fingerprint frame (set register value for this session) */
+	if ((ret = fp_configure(dev)) != 0) {
+		fp_err("fp_configure failed (err=%d)", ret);
+		goto err_free_buffer;
 	}
 
-	return 0;
-err:
-	return -1;
+	return dev;
+
+err_free_buffer:
+	free(dev->braw);
+err_free_dev:
+	free(dev);
+	return NULL;
 }
 
 
 /*
  * Detect the contact by reading register 0x03.
  */
-static int contact_detect(libusb_device_handle *dev)
+static int contact_detect(struct etes603_dev *dev)
 {
 	uint8_t reg_03;
-	if (sync_read_registers(dev, 2, REG_03, &reg_03))
+	if (dev_get_regs(dev->udev, 2, REG_03, &reg_03))
 		return -1;
 	/* 83,A3:no 93,B3:yes */
 	return (reg_03 >> 4) & 0x1;
@@ -1068,47 +1132,53 @@ static int contact_detect(libusb_device_handle *dev)
 
 /*
  * Initialize the finger contact sensor.
+ * DTVRT tuning must be done before and it may modify DCOffset register.
  */
-static int contact_polling_init(libusb_device_handle *dev)
+static int contact_polling_init(struct etes603_dev *dev)
 {
 	uint8_t reg_50;
-	/* TODO fixed value for written regs?  */
-	if (sync_write_mode_control(dev, REG_MODE_SLEEP)
-	    || sync_write_registers(dev, 2, REG_VCO_CONTROL, 0x13)
-	    || sync_write_registers(dev, 2, REG_59, 0x18)
-	    || sync_write_registers(dev, 2, REG_5A, 0x08)
-	    || sync_write_registers(dev, 2, REG_5B, 0x10))
+	assert(dev->dcoffset_ct);
+	/* ? Check if always same values */
+	if (set_mode_control(dev, REG_MODE_SLEEP)
+	    || dev_set_regs(dev->udev, 2, REG_VCO_CONTROL, REG_VCO_IDLE)
+	    || dev_set_regs(dev->udev, 2, REG_59, 0x18)
+	    || dev_set_regs(dev->udev, 2, REG_5A, 0x08)
+	    || dev_set_regs(dev->udev, 2, REG_5B, 0x10))
 		return -1;
-
-	if (sync_write_mode_control(dev, REG_MODE_CONTACT)
-	    || sync_read_registers(dev, 2, REG_50, &reg_50) /* 0F */
-	    || sync_write_registers(dev, 2, REG_50, 0x8F))  /* ((reg_50 & 7F) | 0x80) */
+	if (set_mode_control(dev, REG_MODE_CONTACT)
+	    || dev_get_regs(dev->udev, 2, REG_50, &reg_50)
+	    || dev_set_regs(dev->udev, 2, REG_50, ((reg_50 & 0x7F) | 0x80)))
 		return -2;
+	if (dev_set_regs(dev->udev, 2, REG_DCOFFSET, dev->dcoffset_ct))
+		return -3;
 	return 0;
 }
 
 /*
  * Change the sensor mode after contact detection.
  */
-static int contact_polling_exit(libusb_device_handle *dev)
+static int contact_polling_exit(struct etes603_dev *dev)
 {
-	/* Set VCO_CONTROL to Realtime mode (should it reset value before polling?) */
-	if (sync_write_mode_control(dev, REG_MODE_SLEEP)
-	    || sync_write_registers(dev, 2, REG_VCO_CONTROL, 0x14))
+	/* Set VCO_CONTROL back to realtime mode */
+	if (set_mode_control(dev, REG_MODE_SLEEP)
+	    || dev_set_regs(dev->udev, 2, REG_VCO_CONTROL, REG_VCO_RT))
 		return -1;
 	return 0;
 }
 
 /*
  * Detect finger contact with the sensor.
- * Returns 1 if contact detected or 0 if timeout.
+ * Returns 1 if contact detected or 0 if no contact and the timeout is expired.
+ * Returns < 0 when an error happens.
  */
-static int contact_polling(libusb_device_handle *dev)
+static int contact_polling(struct etes603_dev *dev)
 {
 	/* Contact polling power consumption is lower than capturing a lot of
 	 * frame. From website: Typical 15 mA @ USB2.0 imaging/navigating and
 	 * Typical <500uA finger detect mode. */
-	struct timeval endtime, curtime = {.tv_sec = CS_DETECT_TIMEOUT / 1000, .tv_usec = 0};
+	struct timeval endtime;
+	struct timeval curtime = {.tv_sec = CS_DETECT_TIMEOUT / 1000,
+				  .tv_usec = 0};
 	int contact;
 
 	if (contact_polling_init(dev)) {
@@ -1142,82 +1212,34 @@ static int contact_polling(libusb_device_handle *dev)
 
 end:
 	contact_polling_exit(dev);
-		
+
 	return contact;
 }
 
 /*
- * Ask the sensor for a full frame.
+ * Ask the sensor for a fingerprint frame.
  */
-static int image_capture_full(libusb_device_handle *dev, uint8_t *buf)
+__attribute__((used))
+static int fp_capture(struct etes603_dev *dev, uint8_t *buf, size_t bufsize)
 {
-	int i;
-	uint8_t *bend, *bcur;
-#if 0
-	uint8_t *fstart, *fend;
-#endif
-
-	if (frame_full_configure(dev))
+	if (bufsize < FRAMEFP_SIZE)
 		return -1;
 
-	if (sync_write_mode_control(dev, REG_MODE_34))
+	if (fp_configure(dev))
 		return -2;
 
-	if (sync_read_buffer_full(dev, buf))
+	if (set_mode_control(dev, REG_MODE_FP))
 		return -3;
 
-	bend = buf + 64000;
-	bcur = buf;
-	while (bcur < bend) {
-		unsigned int acc = 0;
-		/* Sum bytes of 2 lines */
-		for (i = 0; i < 256; i++)
-			acc = bcur[i];
-		/* If threshold reach, we assume fingerprint starts */
-		if (acc > 255 * 8)
-			break;
-		bcur += 256;
-	}
-#if 0
-	fstart = bcur;
-	while (bcur < bend) {
-		unsigned int acc = 0;
-		/* Sum bytes of 2 lines */
-		for (i = 0; i < 256; i++)
-			acc = bcur[i];
-		/* If threshold reach, we assume fingerprint ends */
-		if (acc < 255 * 8)
-			break;
-		bcur += 256;
-	}
-	fend = bcur;
+	if (dev_get_fp(dev->udev, buf))
+		return -4;
 
-	/* If the end of buffer has still fingerprint, acquire new frame */
-	if (fend == bend) {
-		if (sync_read_buffer_full(dev, bcur))
-			return -2;
-		bend += 64000;
-		while (bcur < bend) {
-			unsigned int acc = 0;
-			/* Sum bytes of 2 lines */
-			for (i = 0; i < 256; i++)
-				acc = bcur[i];
-			/* If threshold reach, we assume fingerprint ends */
-			if (acc < 255 * 8)
-				break;
-			bcur += 256;
-		}
-		fend = bcur;
-	}
-#endif	
-
-	/* Set the sensor to sleep mode */
-	if (sync_write_mode_control(dev, REG_MODE_SLEEP))
-		return -1;
+	if (set_mode_control(dev, REG_MODE_SLEEP))
+		return -5;
 
 	/* Set VCO_CONTROL to realtime mode (maybe not needed) */
-	if (sync_write_registers(dev, 2, REG_VCO_CONTROL, 0x14))
-		return -1;
+	if (dev_set_regs(dev->udev, 2, REG_VCO_CONTROL, REG_VCO_RT))
+		return -6;
 
 	return 0;
 }
@@ -1226,13 +1248,13 @@ static int image_capture_full(libusb_device_handle *dev, uint8_t *buf)
  * Do a full finger capture using frames and reconstruction.
  * This function uses synchronous tranfers.
  */
-static int image_capture(libusb_device_handle *dev, uint8_t *braw, int size)
+__attribute__((used))
+static int fp_capture_asm(struct etes603_dev *dev, uint8_t *braw, size_t bsize)
 {
 	uint8_t bframe[FRAME_SIZE];
 	uint8_t *braw_cur = braw;
-	uint8_t *braw_end = braw + size;
+	uint8_t *braw_end = braw + bsize;
 
-	/* TODO could add check if cancel is asked */
 	if (frame_prepare_capture(dev))
 		goto err;
 	if (frame_capture(dev, bframe))
@@ -1243,18 +1265,20 @@ static int image_capture(libusb_device_handle *dev, uint8_t *braw, int size)
 	do {
 		if (frame_capture(dev, bframe))
 			goto err;
-	} while (process_frame_empty(bframe, 1));
+	} while (process_frame_empty(bframe, FRAME_SIZE, 1));
 
-	/* While is not aborted and the frame is not empty and that the buffer is not full, retrieve and process frame. */
+	/* While is not aborted and the frame is not empty and that the buffer
+	 * is not full, retrieve and process frame. */
 	do {
 		braw_cur = process_frame(braw_cur, bframe);
 		if (frame_capture(dev, bframe))
 			goto err;
-	} while (!process_frame_empty(bframe, 1) && (braw_cur + FRAME_SIZE) < braw_end);
+	} while (!process_frame_empty(bframe, FRAME_SIZE, 1)
+		 && (braw_cur + FRAME_SIZE) < braw_end);
 
 	/* Set the sensor in sleep mode (needed?) */
-	if (sync_write_mode_control(dev, REG_MODE_SLEEP))
-		return -1;
+	if (set_mode_control(dev, REG_MODE_SLEEP))
+		goto err;
 
 	return 0;
 err:
@@ -1264,12 +1288,16 @@ err:
 
 
 /*
- *
+ * Detect when a finger is on the sensor.
  */
-static int sensor_move_detect(libusb_device_handle *dev)
+__attribute__((used))
+static int sensor_detect_finger(struct etes603_dev *dev)
 {
 	int ret;
-	/* TODO different ways to detect move: contact sensor, looking into frames, or... */
+	/* There are different ways to detect fingers. We can capture frames
+	 * until a non-empty frame is found or we can use the contact sensor as
+	 * done here.
+	 */
 	ret = contact_polling(dev);
 	return ret;
 }
@@ -1277,13 +1305,20 @@ static int sensor_move_detect(libusb_device_handle *dev)
 /*
  * Close the sensor by setting some registers.
  */
-static int sensor_close(libusb_device_handle *dev)
+static int sensor_close(struct etes603_dev *dev, libusb_device_handle *udev)
 {
-	/* TODO fixed values? */
-	sync_write_registers(dev, 24, REG_DCOFFSET, 0x31, REG_GAIN, 0x23,
-		REG_DTVRT, 0x0D, REG_51, 0x30, REG_VCO_CONTROL, 0x13, REG_F0, 0x01,
-		REG_F2, 0x4E, REG_50, 0x8F, REG_59, 0x18, REG_5A, 0x08, REG_5B, 0x10,
-		REG_MODE_CONTROL, REG_MODE_CONTACT);
+	if (udev) {
+		/* Values from a captured frame */
+		dev_set_regs(udev, 24, REG_DCOFFSET, 0x31, REG_GAIN, 0x23,
+			REG_DTVRT, 0x0D, REG_51, 0x30, REG_VCO_CONTROL, REG_VCO_IDLE, REG_F0, 0x01,
+			REG_F2, 0x4E, REG_50, 0x8F, REG_59, 0x18, REG_5A, 0x08, REG_5B, 0x10,
+			REG_MODE_CONTROL, REG_MODE_CONTACT);
+	}
+
+	if (dev) {
+		free(dev->braw);
+		free(dev);
+	}
 
 	return 0;
 }
@@ -1291,138 +1326,128 @@ static int sensor_close(libusb_device_handle *dev)
 
 /* Processing functions */
 
-/* Return the brightness of a frame */
-static unsigned int process_get_brightness(uint8_t *f)
+/*
+ * Return the brightness of a frame
+ */
+static unsigned int process_get_brightness(uint8_t *f, size_t s)
 {
-	int i;
-	unsigned int sum = 0;
-	for (i = 0; i < FRAME_SIZE; i++) {
+	unsigned int i, sum = 0;
+	for (i = 0; i < s; i++) {
 		sum += f[i] & 0x0F;
 		sum += f[i] >> 4;
 	}
 	return sum;
 }
 
-
-
 /*
  * Return true if the frame is almost empty.
  * If mode is 0, it is high sensibility for device tuning.
  * Otherwise, for capture mode.
  */
-static int process_frame_empty(uint8_t *f, int mode)
+static int process_frame_empty(uint8_t *frame, size_t size, int mode)
 {
-	/* int threshold could be replaced by mode == MODE_TUNING || MODE_CAPTURE */
-	unsigned int sum = process_get_brightness(f);
+	unsigned int sum = process_get_brightness(frame, size);
 	/* Allow an average of 'threshold' luminosity per pixel */
 	if (mode) {
 		/* mode capture */
-		if (sum < FRAME_SIZE * 2)
+		if (sum < size * 2)
 			return 1;
 	} else {
 		/* mode tuning */
-		if (sum < FRAME_SIZE)
+		if (sum < size)
 			return 1;
 	}
 	return 0;
 }
 
-
-/* Return the number of new lines in 'src' */
-static int process_find_dup(uint8_t *dst, uint8_t *src)
+/*
+ * Compare lines in 'dst' and 'src'.
+ * Return the number of new lines in 'src'.
+ */
+static int process_find_dup(uint8_t *dst, uint8_t *src, uint8_t width,
+	uint8_t height)
 {
-	int i,j,v;
-
+	int v;
+	unsigned int i, j;
+	/* Total errors when substract src from dst */
 	unsigned int sum_error;
-	unsigned int nb = 4;
-	unsigned int min_error = process_get_brightness(src) / 6; /* This value is found by tests */
-	/* 384 bytes / 196 px width / 4 bits value */
-	/* Scan 4 lines, assuming first that all 4 lines match. */
-	//printf("sum_error=");
-	for (i = 0; i < 4; i++) {
+	/* Number of lines that matches */
+	unsigned int nb = height;
+	/* Size in byte is width * height / 2 pixels per byte */
+	unsigned int bwidth = width / 2;
+	unsigned int bsize = bwidth * height;
+	/* Maximal error threshold to consider that lines match. */
+	/* Value 6 is empirical. */
+	unsigned int max_error = process_get_brightness(src, bsize) / 6;
+	/* Typical frame: 384 bytes / 196 px width / 4 bits value */
+	/* Scan lines, assuming first that all lines match. */
+	for (i = 0; i < height; i++) {
 		sum_error = 0;
-		for (j = 0; j < 96 * (4 - i); j++) {
-			/* subtract */
+		for (j = 0; j < bwidth * (height - i); j++) {
+			/* subtract and absolute value */
 			v = (int)(dst[j] & 0x0F) - (int)(src[j] & 0x0F);
-			/* note: can use ^2 */
+			/* note: we could use ^2 */
 			v = v >= 0 ? v : -v;
 			sum_error += v;
 			v = (int)(dst[j] >> 4) - (int)(src[j] >> 4);
 			v = v >= 0 ? v : -v;
 			sum_error += v;
 		}
-
-		sum_error *= 127; /* increase value before divide (use int and value will be small) */
-		//printf("%8d (%8d) ", sum_error / j, sum_error );
+		/* The usage of int makes value imprecise when divide. */
+		sum_error *= 127;
 		sum_error = sum_error / j; /* Avg error/pixel */
-		if (sum_error < min_error) {
-			min_error = sum_error;
+		if (sum_error < max_error) {
+			max_error = sum_error;
 			nb = i;
-			//break;
 		}
-		dst += 96; /* Next line */
+		dst += bwidth; /* Next line */
 	}
-	//printf("-> newline=%d brightness=%d\n", nb, process_get_brightness(src));
 	return nb;
 }
 
 /*
- * first 'merge' bytes from src and dst are merged then raw copy.
+ * The first 'merge' bytes from src and dst are merged then raw copy.
  */
-static void merge_and_append(uint8_t *dst, uint8_t *src, size_t merge)
+static void merge_and_append(uint8_t *dst, uint8_t *src, size_t merge,
+	size_t size)
 {
 	size_t i;
 	uint8_t pxl, pxh;
-	/* Sanity checks */
-	if (merge > FRAME_SIZE)
-		merge = FRAME_SIZE;
-	/* Merge */
+	assert(merge <= size);
 	for (i = 0; i < merge; i++) {
 		pxl = ((dst[i] & 0x0F) + (src[i] & 0x0F)) >> 1;
 		pxh = ((dst[i] >> 4) + (src[i] >> 4)) >> 1;
 		dst[i] = pxl | (pxh << 4);
 	}
-	/* Raw copy */
-	for (i = merge; i < FRAME_SIZE; i++) {
+	for (i = merge; i < size; i++) {
 		dst[i] = src[i];
 	}
 }
 
 
 
-/* 'dst' must point to the last buffer and have 384 bytes free at the end to append data.
- * 'src' must point to the frame received (384 bytes). */
+/*
+ * Integrate the new frame 'src' into previous assembled frames 'dst'.
+ * 'dst' must point to the last buffer and have 384 bytes free at the end to append data.
+ * 'src' must point to the frame received (384 bytes).
+ */
 static uint8_t *process_frame(uint8_t *dst, uint8_t *src)
 {
 	int new_line;
 
-	/* TODO sweep direction to determine... merging will be diff. */
-
-	new_line = process_find_dup(dst, src);
-	dst += 96 * new_line;
+	/* TODO sweep direction to determine... merging will be different. */
+	new_line = process_find_dup(dst, src, FRAME_WIDTH, FRAME_HEIGHT);
+	dst += (FRAME_WIDTH / 2) * new_line;
 	/* merge_and_append give a better result than just copying */
-	merge_and_append(dst, src, (4-new_line)*96);
+	merge_and_append(dst, src, (FRAME_HEIGHT - new_line) * (FRAME_WIDTH / 2), FRAME_SIZE);
 	/* memcpy(dst, src, FRAME_SIZE); */
 
 	return dst;
 }
 
-/* Transform 4 bits image to 32bits RGB image */
-static void process_transform4_to_32(uint8_t *input, unsigned int input_size, uint32_t *output)
-{
-	unsigned int i, j = 0;
-	for (i = 0; i < input_size; i++, j += 2) {
-		/* 16 gray levels transform to 256 levels using << 4 */
-		uint8_t dl = input[i] << 4;
-		uint8_t dh = input[i] & 0xF0;
-		/* RGB all same value */
-		output[j]   = dh | (dh << 8) | (dh << 16);
-		output[j+1] = dl | (dl << 8) | (dl << 16);
-	}
-}
-
-/* Transform 4bits image to 8bits image */
-static void process_transform4_to_8(uint8_t *input, unsigned int input_size, uint8_t *output)
+/* Transform 4 bits image to 8 bits image */
+static void process_transform4_to_8(uint8_t *input, unsigned int input_size,
+	uint8_t *output)
 {
 	unsigned int i, j = 0;
 	for (i = 0; i < input_size; i++, j += 2) {
@@ -1435,50 +1460,53 @@ static void process_transform4_to_8(uint8_t *input, unsigned int input_size, uin
 
 /* libfprint stuff */
 
-/* Called when the deactivation was requested. */
-static void complete_deactivation(struct fp_img_dev *dev)
+/*
+ * Called when the deactivation was requested.
+ */
+static void complete_deactivation(struct fp_img_dev *idev)
 {
-	struct etes603_data *pdata = dev->priv;
+	struct etes603_dev *dev = idev->priv;
 
 	/* TODO I guess I should not completely deinit the sensor? */
 	/* TODO Change at least to SLEEP_MODE ? */
-
-	pdata->deactivating = FALSE;
-	fpi_imgdev_deactivate_complete(dev);
+	dev->deactivating = FALSE;
+	fpi_imgdev_deactivate_complete(idev);
 }
 
-/* Transforms the raw data to fprint data and submit it to fprint. */
-static int transform_to_fpi(struct fp_img_dev *dev)
+/*
+ * Transforms the raw data to fprint data and submit it to fprint.
+ */
+static int transform_to_fpi(struct fp_img_dev *idev)
 {
 	struct fp_img *img;
-	struct etes603_data *pdata = dev->priv;
+	struct etes603_dev *dev = idev->priv;
 
-	if (pdata->mode == 1) {
+	if (dev->mode == 1) {
 		/* Assembled frames */
 		/* braw_cur points to the last frame so needs to adjust to end */
-		unsigned int size = pdata->braw_cur + FRAME_SIZE - pdata->braw;
+		unsigned int size = dev->braw_cur + FRAME_SIZE - dev->braw;
 		/* es603 has 2 pixels per byte. */
 		img = fpi_img_new(size * 2);
 		img->flags = FP_IMG_COLORS_INVERTED | FP_IMG_V_FLIPPED;
 		img->height = size * 2 / FRAME_WIDTH;
 		/* img->width could be set 256 always but need a new function to handle this */
 		img->width = FRAME_WIDTH;
-		process_transform4_to_8(pdata->braw, size, (uint8_t*)img->data);
+		process_transform4_to_8(dev->braw, size, (uint8_t*)img->data);
 	} else {
-		/* Full Frame */
-		img = fpi_img_new(FRAMEFULL_SIZE * 2);
+		/* FingerPrint Frame */
+		img = fpi_img_new(FRAMEFP_SIZE * 2);
 		/* Images received are white on black, so invert it (FP_IMG_COLORS_INVERTED) */
 		/* TODO for different sweep direction ? FP_IMG_V_FLIPPED | FP_IMG_H_FLIPPED */
 		img->flags = FP_IMG_COLORS_INVERTED | FP_IMG_V_FLIPPED;
 		/* img->width can only be changed when -1 was set at init */
-		img->width = FRAMEFULL_WIDTH;
-		img->height = FRAMEFULL_HEIGHT;
-		process_transform4_to_8(pdata->braw, FRAMEFULL_SIZE, (uint8_t*)img->data);
+		img->width = FRAMEFP_WIDTH;
+		img->height = FRAMEFP_HEIGHT;
+		process_transform4_to_8(dev->braw, FRAMEFP_SIZE, (uint8_t*)img->data);
 	}
 	/* Send image to fpi */
-	fpi_imgdev_image_captured(dev, img);
+	fpi_imgdev_image_captured(idev, img);
 	/* Indicate that the finger is removed. */
-	fpi_imgdev_report_finger_status(dev, FALSE);
+	fpi_imgdev_report_finger_status(idev, FALSE);
 
 	return 0;
 }
@@ -1491,213 +1519,212 @@ static int transform_to_fpi(struct fp_img_dev *dev)
 #define STATE_CAPTURING_REQ_SEND       5
 #define STATE_CAPTURING_REQ_RECV       6
 #define STATE_CAPTURING_ANS            7
-#define STATE_INIT_FULL_REQ_SEND       8
-#define STATE_INIT_FULL_REQ_RECV       9
-#define STATE_INIT_FULL_ANS            10
-#define STATE_CAPTURING_FULL_REQ_SEND  11
-#define STATE_CAPTURING_FULL_REQ_RECV  12
-#define STATE_CAPTURING_FULL_ANS       13
+#define STATE_INIT_FP_REQ_SEND         8
+#define STATE_INIT_FP_REQ_RECV         9
+#define STATE_INIT_FP_ANS              10
+#define STATE_CAPTURING_FP_REQ_SEND    11
+#define STATE_CAPTURING_FP_REQ_RECV    12
+#define STATE_CAPTURING_FP_ANS         13
 #define STATE_DEACTIVATING             14
 
-static int async_read_buffer(struct fp_img_dev *dev, unsigned char ep,
+static int async_transfer(struct fp_img_dev *dev, unsigned char ep,
 		unsigned char *msg_data, unsigned int msg_size);
 
-/* Asynchronous function callback for asynchronous read buffer. */
-static void async_read_buffer_cb(struct libusb_transfer *transfer)
+/*
+ * Asynchronous function callback for asynchronous read buffer.
+ */
+static void async_transfer_cb(struct libusb_transfer *transfer)
 {
-	struct fp_img_dev *dev = transfer->user_data;
-	struct etes603_data *pdata = dev->priv;
+	struct fp_img_dev *idev = transfer->user_data;
+	struct etes603_dev *pdata = idev->priv;
 	struct egis_msg *msg;
-	char dbg_data[60]; /* Format is "00 11 ... \0" */
 
 	/* Check status except if initial state (entrypoint) */
 	if (pdata->state != STATE_INIT
 	    && transfer->status != LIBUSB_TRANSFER_COMPLETED) {
-		fp_warn("transfer is not completed (state=%d/status=%d)", pdata->state, transfer->status);
+		fp_warn("transfer is not completed (state=%d/status=%d)",
+			pdata->state, transfer->status);
 		goto err;
 	}
-
-	/* To ensure non-fragmented answer, LIBUSB_TRANSFER_SHORT_NOT_OK is used. */
-	/* now do the real stuff */
+	/* To ensure non-fragmented message, LIBUSB_TRANSFER_SHORT_NOT_OK is
+	 * used. */
+	if (pdata->state != STATE_INIT)
+		debug_output(transfer->endpoint, transfer->buffer, transfer->actual_length);
 
 goback:
 
 	if (pdata->deactivating) {
-		/* TODO libusb_cancel_transfer should not be required here since the
-		 * transfer is completed. */
-		complete_deactivation(dev);
+		/* libusb_cancel_transfer should not be required here since the
+		 * transfer has to be complete. */
+		complete_deactivation(idev);
 		goto err;
 	}
 
 	switch (pdata->state) {
-		case STATE_INIT:
-			pdata->state = STATE_FINGER_REQ_SEND;
-			/* no break, we are continuing with next step */
+	case STATE_INIT:
+		pdata->state = STATE_FINGER_REQ_SEND;
+		/* no break, we are continuing with next step */
 
-		case STATE_FINGER_REQ_SEND:
-			fp_dbg("STATE_FINGER_REQ_SEND:");
-			msg = malloc(sizeof(struct egis_msg));
-			msg_read_buffer((struct egis_msg *)msg, CMD_READ_BUF, 0xC0, 0, 0, 0, 0);
-			if (async_read_buffer(dev, EP_OUT, (unsigned char *)msg, MSG_HEADER_SIZE + 6)) {
-				goto err;
-			}
-			pdata->state = STATE_FINGER_REQ_RECV;
-			break;
-
-		case STATE_FINGER_REQ_RECV:
-			fp_dbg("STATE_FINGER_REQ_RECV: %d", transfer->actual_length);
-			/* The request succeeds. */
-			msg = malloc(FRAME_SIZE);
-			memset(msg, 0, FRAME_SIZE);
-			/* Now ask for receiving data. */
-			if (async_read_buffer(dev, EP_IN, (unsigned char *)msg, FRAME_SIZE)) {
-				goto err;
-			}
-			pdata->state = STATE_FINGER_ANS;
-			break;
-
-		case STATE_FINGER_ANS:
-			sprint_data(dbg_data, 60, transfer->buffer, transfer->actual_length);
-			fp_dbg("STATE_FINGER_ANS: %s (size %d)", dbg_data, transfer->actual_length);
-			if (process_frame_empty(transfer->buffer, 1)) {
-				/* No finger, request a new frame. */
-				pdata->state = STATE_FINGER_REQ_SEND;
-				goto goback;
-			}
-			/* Indicate that the finger is present. */
-			fpi_imgdev_report_finger_status(dev, TRUE);
-			/* Select mode for capturing. */
-			if (pdata->mode == 1) {
-				pdata->state = STATE_CAPTURING_REQ_SEND;
-			} else {
-				pdata->state = STATE_INIT_FULL_REQ_SEND;
-				goto MODE_FULL_FRAME;
-			}
-			/* no break, continue to state STATE_CAPTURING_REQ_SEND. */
-
-		case STATE_CAPTURING_REQ_SEND:
-			fp_dbg("STATE_CAPTURING_REQ_SEND:");
-			msg = malloc(sizeof(struct egis_msg));
-			msg_read_buffer(msg, CMD_READ_BUF, 0xC0, 0, 0, 0, 0);
-			if (async_read_buffer(dev, EP_OUT, (unsigned char *)msg, MSG_HEADER_SIZE + 6)) {
-				goto err;
-			}
-			pdata->state = STATE_CAPTURING_REQ_RECV;
-			break;
-		
-		case STATE_CAPTURING_REQ_RECV:
-			fp_dbg("STATE_CAPTURING_REQ_RECV:");
-			/* The request succeeds. */
-			msg = malloc(FRAME_SIZE);
-			memset(msg, 0, FRAME_SIZE);
-			/* Receiving data. */
-			if (async_read_buffer(dev, EP_IN, (unsigned char *)msg, FRAME_SIZE)) {
-				goto err;
-			}
-			pdata->state = STATE_CAPTURING_ANS;
-			break;
-
-		case STATE_CAPTURING_ANS:
-			sprint_data(dbg_data, 60, transfer->buffer, transfer->actual_length);
-			fp_dbg("STATE_CAPTURING_ANS: %s (size %d)", dbg_data, transfer->actual_length);
-			if (process_frame_empty(transfer->buffer, 1)) {
-				/* Finger leaves, send final image. */
-				transform_to_fpi(dev);
-				pdata->state = STATE_DEACTIVATING;
-				break;
-			}
-			/* Merge new frame with current image. */
-			pdata->braw_cur = process_frame(pdata->braw_cur, transfer->buffer);	
-			if ((pdata->braw_cur + FRAME_SIZE) >= pdata->braw_end) {
-				fp_warn("STATE_CAPTURING_ANS: Buffer is full %p %p (%p)",pdata->braw_cur,pdata->braw_end,(pdata->braw_cur + FRAME_SIZE) );
-				/* Buffer is full, send final image. */
-				transform_to_fpi(dev);
-				pdata->state = STATE_DEACTIVATING;
-				break;
-			}
-			/* Ask new frame. */
-			pdata->state = STATE_CAPTURING_REQ_SEND;
-			goto goback;	
-
-		case STATE_INIT_FULL_REQ_SEND:
-MODE_FULL_FRAME:
-			/* Change to mode REG_MODE_34 */
-			fp_dbg("STATE_INIT_FULL_REQ_SEND:");
-			msg = malloc(sizeof(struct egis_msg));
-			msg_header_prepare(msg);
-			msg->cmd = CMD_WRITE_REG;
-			msg->egis_writereg.nb = 0x01;
-			msg->egis_writereg.regs[0].reg = REG_MODE_CONTROL;
-			msg->egis_writereg.regs[0].val = REG_MODE_34;
-			if (async_read_buffer(dev, EP_OUT, (unsigned char *)msg, MSG_HEADER_SIZE + 3)) {
-				goto err;
-			}
-			pdata->state = STATE_INIT_FULL_REQ_RECV;
-			break;
-
-		case STATE_INIT_FULL_REQ_RECV:
-			fp_dbg("STATE_INIT_FULL_REQ_RECV:");
-			/* The request succeeds. */
-			msg = malloc(sizeof(struct egis_msg));
-			memset(msg, 0, sizeof(struct egis_msg));
-			/* Receiving data. */
-			if (async_read_buffer(dev, EP_IN, (unsigned char *)msg, MSG_HEADER_SIZE)) {
-				goto err;
-			}
-			pdata->state = STATE_INIT_FULL_ANS;
-			break;
-
-		case STATE_INIT_FULL_ANS:
-			sprint_data(dbg_data, 60, transfer->buffer, transfer->actual_length);
-			fp_dbg("STATE_INIT_FULL_ANS: %s (size %d)", dbg_data, transfer->actual_length);
-			msg = (struct egis_msg *)transfer->buffer;
-			if (msg_header_check(msg))
-				goto err;
-			if (msg->cmd != CMD_OK)
-				goto err;
-			pdata->state = STATE_CAPTURING_FULL_REQ_SEND;
-			/* continuing, now ask for the full frame */
-
-		case STATE_CAPTURING_FULL_REQ_SEND:
-			fp_dbg("STATE_CAPTURING_FULL_REQ_SEND:");
-			msg = malloc(sizeof(struct egis_msg));
-			msg_read_buffer(msg, CMD_READ_BUF2, 0xF4, 0x02, 0x01, 0x64, 0x00); 
-			if (async_read_buffer(dev, EP_OUT, (unsigned char *)msg, MSG_HEADER_SIZE + 5)) {
-				goto err;
-			}
-			pdata->state = STATE_CAPTURING_FULL_REQ_RECV;
-			break;
-		
-		case STATE_CAPTURING_FULL_REQ_RECV:
-			fp_dbg("STATE_CAPTURING_FULL_REQ_RECV:");
-			/* The request succeeds. */
-			msg = malloc(FRAMEFULL_SIZE);
-			memset(msg, 0, FRAMEFULL_SIZE);
-			/* Receiving data. */
-			if (async_read_buffer(dev, EP_IN, (unsigned char *)msg, FRAMEFULL_SIZE)) {
-				goto err;
-			}
-			pdata->state = STATE_CAPTURING_FULL_ANS;
-			break;
-
-		case STATE_CAPTURING_FULL_ANS:
-			sprint_data(dbg_data, 60, transfer->buffer, transfer->actual_length);
-			fp_dbg("STATE_CAPTURING_FULL_ANS: %s (size %d)", dbg_data, transfer->actual_length);
-			memcpy(pdata->braw, transfer->buffer, transfer->actual_length);
-			/* Set STATE_DEACTIVATING before sending image because
-			 * deactivation is called when image is sent. */
-			pdata->state = STATE_DEACTIVATING;
-			transform_to_fpi(dev);
-			break;
-
-		case STATE_DEACTIVATING:
-			fp_dbg("STATE_DEACTIVATING:");
-			/* TODO change sensor to sleep mode but not complete deactivation */
-			break;
-
-		default:
-			fp_err("Umknown state");
+	case STATE_FINGER_REQ_SEND:
+		fp_dbg("STATE_FINGER_REQ_SEND:");
+		msg = malloc(sizeof(struct egis_msg));
+		msg_get_frame(msg, FRAME_WIDTH, 0, 0, 0, 0);
+		if (async_transfer(idev, EP_OUT, (unsigned char *)msg, MSG_HDR_SIZE + 6)) {
 			goto err;
+		}
+		pdata->state = STATE_FINGER_REQ_RECV;
+		break;
+
+	case STATE_FINGER_REQ_RECV:
+		fp_dbg("STATE_FINGER_REQ_RECV:");
+		/* The request succeeds. */
+		msg = malloc(FRAME_SIZE);
+		memset(msg, 0, FRAME_SIZE);
+		/* Now ask for receiving data. */
+		if (async_transfer(idev, EP_IN, (unsigned char *)msg, FRAME_SIZE)) {
+			goto err;
+		}
+		pdata->state = STATE_FINGER_ANS;
+		break;
+
+	case STATE_FINGER_ANS:
+		fp_dbg("STATE_FINGER_ANS:");
+		if (process_frame_empty(transfer->buffer, FRAME_SIZE, 1)) {
+			/* No finger, request a new frame. */
+			pdata->state = STATE_FINGER_REQ_SEND;
+			goto goback;
+		}
+		/* Indicate that the finger is present. */
+		fpi_imgdev_report_finger_status(idev, TRUE);
+		/* Select mode for capturing. */
+		if (pdata->mode == 1) {
+			pdata->state = STATE_CAPTURING_REQ_SEND;
+		} else {
+			pdata->state = STATE_INIT_FP_REQ_SEND;
+			goto MODE_FP;
+		}
+		/* no break, continue to state STATE_CAPTURING_REQ_SEND. */
+
+	case STATE_CAPTURING_REQ_SEND:
+		fp_dbg("STATE_CAPTURING_REQ_SEND:");
+		msg = malloc(sizeof(struct egis_msg));
+		msg_get_frame(msg, FRAME_WIDTH, 0, 0, 0, 0);
+		if (async_transfer(idev, EP_OUT, (unsigned char *)msg, MSG_HDR_SIZE + 6)) {
+			goto err;
+		}
+		pdata->state = STATE_CAPTURING_REQ_RECV;
+		break;
+
+	case STATE_CAPTURING_REQ_RECV:
+		fp_dbg("STATE_CAPTURING_REQ_RECV:");
+		/* The request succeeds. */
+		msg = malloc(FRAME_SIZE);
+		memset(msg, 0, FRAME_SIZE);
+		/* Receiving data. */
+		if (async_transfer(idev, EP_IN, (unsigned char *)msg, FRAME_SIZE)) {
+			goto err;
+		}
+		pdata->state = STATE_CAPTURING_ANS;
+		break;
+
+	case STATE_CAPTURING_ANS:
+		fp_dbg("STATE_CAPTURING_ANS:");
+		if (process_frame_empty(transfer->buffer, FRAME_SIZE, 1)) {
+			/* Finger leaves, send final image. */
+			pdata->state = STATE_DEACTIVATING;
+			transform_to_fpi(idev);
+			break;
+		}
+		/* Merge new frame with current image. */
+		pdata->braw_cur = process_frame(pdata->braw_cur, transfer->buffer);
+		if ((pdata->braw_cur + FRAME_SIZE) >= pdata->braw_end) {
+			fp_warn("STATE_CAPTURING_ANS: Buffer is full");
+			/* Buffer is full, send final image. */
+			pdata->state = STATE_DEACTIVATING;
+			transform_to_fpi(idev);
+			break;
+		}
+		/* Ask new frame. */
+		pdata->state = STATE_CAPTURING_REQ_SEND;
+		goto goback;
+
+	case STATE_INIT_FP_REQ_SEND:
+MODE_FP:
+		/* Change to mode REG_MODE_FP */
+		fp_dbg("STATE_INIT_FP_REQ_SEND:");
+		msg = malloc(sizeof(struct egis_msg));
+		msg_header_prepare(msg);
+		msg->cmd = CMD_WRITE_REG;
+		msg->egis_writereg.nb = 0x01;
+		msg->egis_writereg.regs[0].reg = REG_MODE_CONTROL;
+		msg->egis_writereg.regs[0].val = REG_MODE_FP;
+		if (async_transfer(idev, EP_OUT, (unsigned char *)msg, MSG_HDR_SIZE + 3)) {
+			goto err;
+		}
+		pdata->state = STATE_INIT_FP_REQ_RECV;
+		break;
+
+	case STATE_INIT_FP_REQ_RECV:
+		fp_dbg("STATE_INIT_FP_REQ_RECV:");
+		/* The request succeeds. */
+		msg = malloc(sizeof(struct egis_msg));
+		memset(msg, 0, sizeof(struct egis_msg));
+		/* Receiving data. */
+		if (async_transfer(idev, EP_IN, (unsigned char *)msg, MSG_HDR_SIZE)) {
+			goto err;
+		}
+		pdata->state = STATE_INIT_FP_ANS;
+		break;
+
+	case STATE_INIT_FP_ANS:
+		fp_dbg("STATE_INIT_FP_ANS:");
+		msg = (struct egis_msg *)transfer->buffer;
+		if (msg_header_check(msg))
+			goto err;
+		if (msg->cmd != CMD_OK)
+			goto err;
+		pdata->state = STATE_CAPTURING_FP_REQ_SEND;
+		/* continuing, now ask for the fingerprint frame */
+
+	case STATE_CAPTURING_FP_REQ_SEND:
+		fp_dbg("STATE_CAPTURING_FP_REQ_SEND:");
+		msg = malloc(sizeof(struct egis_msg));
+		msg_get_fp(msg, 0x01, 0xF4, 0x02, 0x01, 0x64);
+		if (async_transfer(idev, EP_OUT, (unsigned char *)msg, MSG_HDR_SIZE + 5)) {
+			goto err;
+		}
+		pdata->state = STATE_CAPTURING_FP_REQ_RECV;
+		break;
+
+	case STATE_CAPTURING_FP_REQ_RECV:
+		fp_dbg("STATE_CAPTURING_FP_REQ_RECV:");
+		/* The request succeeds. */
+		msg = malloc(FRAMEFP_SIZE);
+		memset(msg, 0, FRAMEFP_SIZE);
+		/* Receiving data. */
+		if (async_transfer(idev, EP_IN, (unsigned char *)msg, FRAMEFP_SIZE)) {
+			goto err;
+		}
+		pdata->state = STATE_CAPTURING_FP_ANS;
+		break;
+
+	case STATE_CAPTURING_FP_ANS:
+		fp_dbg("STATE_CAPTURING_FP_ANS:");
+		memcpy(pdata->braw, transfer->buffer, transfer->actual_length);
+		/* Set STATE_DEACTIVATING before sending image because
+		 * deactivation is called when image is sent. */
+		pdata->state = STATE_DEACTIVATING;
+		transform_to_fpi(idev);
+		break;
+
+	case STATE_DEACTIVATING:
+		fp_dbg("STATE_DEACTIVATING:");
+		/* TODO change sensor to sleep mode but not complete deactivation */
+		break;
+
+	default:
+		fp_err("Umknown state");
+		goto err;
 	}
 
 	/* No need to free buffer or transfer, LIBUSB_TRANSFER_FREE_BUFFER and
@@ -1707,160 +1734,151 @@ MODE_FULL_FRAME:
 err:
 	pdata->state = STATE_DEACTIVATING;
 	fp_err("Error occured in async process");
-	fpi_imgdev_session_error(dev, -EIO);
+	fpi_imgdev_session_error(idev, -EIO);
 	return;
 }
 
-/* Asynchronous read buffer transfer. */
-static int async_read_buffer(struct fp_img_dev *dev, unsigned char ep,
+/*
+ * Asynchronous read buffer transfer.
+ */
+static int async_transfer(struct fp_img_dev *idev, unsigned char ep,
 		unsigned char *msg_data, unsigned int msg_size)
 {
-	int ret;
-	char dbg_data[60]; /* Format is "00 11 ... \0" */
 	struct libusb_transfer *transfer = libusb_alloc_transfer(0);
 
 	if (!transfer)
 		return -ENOMEM;
 
-	if (ep == EP_OUT) {
-		/* Display data on debug mode for output */
-		sprint_data(dbg_data, 60, msg_data, msg_size);
-		fp_dbg("-> %s", dbg_data);
-	}
-
-	libusb_fill_bulk_transfer(transfer, dev->udev, ep, msg_data, msg_size,
-			async_read_buffer_cb, dev, BULK_TIMEOUT);
+	libusb_fill_bulk_transfer(transfer, idev->udev, ep, msg_data, msg_size,
+			async_transfer_cb, idev, BULK_TIMEOUT);
 	transfer->flags = LIBUSB_TRANSFER_SHORT_NOT_OK
 			| LIBUSB_TRANSFER_FREE_BUFFER
 			| LIBUSB_TRANSFER_FREE_TRANSFER;
 
-	ret = libusb_submit_transfer(transfer);
-	if (ret) {
+	if (libusb_submit_transfer(transfer)) {
 		libusb_free_transfer(transfer);
 		return -1;
 	}
 	return 0;
 }
 
-static int dev_activate(struct fp_img_dev *dev, enum fp_imgdev_state state)
+/*
+ * Libfprint asks for activation.
+ */
+static int dev_activate(struct fp_img_dev *idev, enum fp_imgdev_state state)
 {
 	char *mode;
 	struct libusb_transfer fake_transfer;
-	struct etes603_data *pdata = dev->priv;
+	struct etes603_dev *dev = idev->priv;
 
 	/* TODO See how to manage state */
 	if (state != IMGDEV_STATE_INACTIVE) {
-		fp_err("The driver is in state %d", state);
+		fp_err("The driver is in unknown state: %d.", state);
 		/*return -1;*/
 	}
 
-	if (pdata == NULL || pdata->braw == NULL || pdata->braw_end < pdata->braw) {
-		fp_warn("dev->priv is not initialized properly.");
+	if (dev == NULL || dev->braw == NULL || dev->braw_end < dev->braw) {
+		fp_warn("idev->priv is not initialized properly.");
 		return -1;
 	}
 
 	/* Reset info and data */
-	pdata->deactivating = FALSE;
-	pdata->braw_cur = pdata->braw;
-	memset(pdata->braw, 0, (pdata->braw_end - pdata->braw));
-	/* Use default mode (Full Frame) or use environment defined mode */
-	pdata->mode = 0;
+	dev->deactivating = FALSE;
+	dev->braw_cur = dev->braw;
+	memset(dev->braw, 0, (dev->braw_end - dev->braw));
+	/* Use default mode (FingerPrint, FP) or use environment defined mode */
+	dev->mode = 0;
 	if ((mode = getenv("ETES603_MODE")) != NULL) {
-		if (mode[0] == '1') 
-			pdata->mode = 1;
+		if (mode[0] == '1')
+			dev->mode = 1;
 	}
 
 	/* Preparing capture */
-	frame_prepare_capture(dev->udev);
+	frame_prepare_capture(dev);
 
-	/* Enable an entrypoint in the asynchronous mess. */	
-	pdata->state = STATE_INIT;
-	fake_transfer.user_data = dev;
-	async_read_buffer_cb(&fake_transfer);
+	/* Enable an entrypoint in the asynchronous mess. */
+	dev->state = STATE_INIT;
+	fake_transfer.user_data = idev;
+	async_transfer_cb(&fake_transfer);
 
-	fpi_imgdev_activate_complete(dev, 0);
+	fpi_imgdev_activate_complete(idev, 0);
 	return 0;
 }
 
-static void dev_deactivate(struct fp_img_dev *dev)
+/*
+ * Deactivating device.
+ */
+static void dev_deactivate(struct fp_img_dev *idev)
 {
-	struct etes603_data *pdata = dev->priv;
+	struct etes603_dev *dev = idev->priv;
 	/* complete_deactivation can be called asynchronously. */
-	if (pdata->state != STATE_DEACTIVATING)
-		pdata->deactivating = TRUE;
+	if (dev->state != STATE_DEACTIVATING)
+		dev->deactivating = TRUE;
 	else
-		complete_deactivation(dev);
+		complete_deactivation(idev);
 }
 
-static int dev_init(struct fp_img_dev *dev, unsigned long driver_data)
+/*
+ * Device initialization.
+ */
+static int dev_init(struct fp_img_dev *idev, unsigned long driver_data)
 {
 	int ret;
-	struct etes603_data *pdata;
-	/* ??? see driver_data used for. */
+	struct etes603_dev *dev;
 
-	ret = libusb_claim_interface(dev->udev, 0);
+	if (driver_data != 0x0603) {
+		fp_err("This driver has been only tested on ES603 device. "
+		       "(driver_data=%lu)", driver_data);
+		/* In case compatible device needs specific parameters */
+		return -1;
+	}
+
+	ret = libusb_claim_interface(idev->udev, 0);
 	if (ret != LIBUSB_SUCCESS) {
-		fp_err("libusb_claim_interface failed on interface 0 (err=%d)", ret);
+		fp_err("libusb_claim_interface failed on interface 0 "
+		       "(err=%d)", ret);
 		return ret;
 	}
-#if 0
-	/* FIXME this should not be useful? do it if an error happens */
-	ret = libusb_reset_device(dev->udev);
-	if (ret != LIBUSB_SUCCESS) {
-		fp_err("libusb_reset_device failed (err=%d)", ret);
-		return ret;
-	}
-#endif
-	if ((pdata = malloc(sizeof(struct etes603_data))) == NULL) {
-		return -ENOMEM;
-	}
-	/* Allocate a buffer of 1000 frames */
-	if ((pdata->braw = malloc(FRAME_SIZE * 1000)) == NULL) {
-		return -ENOMEM;
-	}
-	pdata->braw_end = pdata->braw + (FRAME_SIZE * 1000);
-	pdata->braw_cur = pdata->braw;
-
-	dev->priv = pdata;
 
 	/* Note: it does make sense to use asynchronous method for initializing
 	 * the device. It also simplifies a lot the design of the driver. */
 	/* Initialize the sensor */
-	ret = sensor_open(dev->udev);
-	if (ret) {
+	if ((dev = sensor_open(idev->udev)) == NULL) {
 		fp_err("cannot open sensor (err=%d)", ret);
-		/* The init process may be abort in the middle, force closing it. */
-		sensor_close(dev->udev);
+		/* The init process may have aborted in the middle, force
+		 * closing it. */
+		sensor_close(dev, idev->udev);
 		return ret;
 	}
 
-	fpi_imgdev_open_complete(dev, 0);
+	idev->priv = dev;
+	fpi_imgdev_open_complete(idev, 0);
 	return 0;
 }
 
-static void dev_deinit(struct fp_img_dev *dev)
+/*
+ * Device deinitialization.
+ */
+static void dev_deinit(struct fp_img_dev *idev)
 {
-	struct etes603_data *pdata = dev->priv;
+	struct etes603_dev *dev = idev->priv;
 
-	sensor_close(dev->udev);
+	sensor_close(dev, idev->udev);
+	idev->priv = NULL;
 
-	/* Free private data. */
-	free(pdata->braw);
-	free(pdata);
-	dev->priv = NULL;
-
-	libusb_release_interface(dev->udev, 0);
-	fpi_imgdev_close_complete(dev);
+	libusb_release_interface(idev->udev, 0);
+	fpi_imgdev_close_complete(idev);
 }
 
 static const struct usb_id id_table[] = {
-	{ .vendor = 0x1c7a, .product = 0x0603 }, /* EgisTec (aka Lightuning) ES603 */
+	/* EgisTec (aka Lightuning) ES603 */
+	{ .vendor = 0x1c7a, .product = 0x0603, .driver_data = 0x0603 },
 	{ 0, 0, 0, },
 };
 
 struct fp_img_driver etes603_driver = {
 	.driver = {
-		.id = 12,
+		.id = ETES603_ID,
 		.name = FP_COMPONENT,
 		.full_name = "EgisTec ES603",
 		.id_table = id_table,
