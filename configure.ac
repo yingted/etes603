@@ -27,6 +27,7 @@ all_drivers="upeke2 upekts upektc upeksonly vcom5s uru4000 fdu2000 aes1610 aes16
 
 require_imaging='no'
 require_aeslib='no'
+require_aesX660='no'
 enable_upeke2='no'
 enable_upekts='no'
 enable_upektc='no'
@@ -48,6 +49,10 @@ AC_ARG_WITH([drivers],[AS_HELP_STRING([--with-drivers],
 	[List of drivers to enable])],
 	[drivers="$withval"],
 	[drivers="$all_drivers"])
+
+if test x$drivers = xall ; then
+	drivers=$all_drivers
+fi
 
 for driver in `echo ${drivers} | sed -e 's/,/ /g' -e 's/,$//g'`; do
 	case ${driver} in
