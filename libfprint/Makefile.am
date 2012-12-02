@@ -8,8 +8,10 @@ UPEKTC_SRC = drivers/upektc.c
 UPEKSONLY_SRC = drivers/upeksonly.c
 URU4000_SRC = drivers/uru4000.c
 AES1610_SRC = drivers/aes1610.c
+AES1660_SRC = drivers/aes1660.c drivers/aes1660.h
 AES2501_SRC = drivers/aes2501.c drivers/aes2501.h
 AES2550_SRC = drivers/aes2550.c drivers/aes2550.h
+AES2660_SRC = drivers/aes2660.c drivers/aes2660.h
 AES4000_SRC = drivers/aes4000.c
 FDU2000_SRC = drivers/fdu2000.c
 VCOM5S_SRC = drivers/vcom5s.c
@@ -24,8 +26,10 @@ EXTRA_DIST = \
 	$(UPEKSONLY_SRC)	\
 	$(URU4000_SRC)		\
 	$(AES1610_SRC)		\
+	$(AES1660_SRC)		\
 	$(AES2501_SRC)		\
 	$(AES2550_SRC)		\
+	$(AES2660_SRC)		\
 	$(AES4000_SRC)		\
 	$(FDU2000_SRC)		\
 	$(VCOM5S_SRC)		\
@@ -33,6 +37,7 @@ EXTRA_DIST = \
 	$(VFS301_SRC)		\
 	$(ETES603_SRC)		\
 	aeslib.c aeslib.h	\
+	aesx660.c aesx660.h	\
 	imagemagick.c		\
 	gdkpixbuf.c		\
 	60-fprint-autosuspend.rules
@@ -124,12 +129,20 @@ if ENABLE_AES1610
 DRIVER_SRC += $(AES1610_SRC)
 endif
 
+if ENABLE_AES1660
+DRIVER_SRC += $(AES1660_SRC)
+endif
+
 if ENABLE_AES2501
 DRIVER_SRC += $(AES2501_SRC)
 endif
 
 if ENABLE_AES2550
 DRIVER_SRC += $(AES2550_SRC)
+endif
+
+if ENABLE_AES2660
+DRIVER_SRC += $(AES2660_SRC)
 endif
 
 if ENABLE_AES4000
@@ -162,6 +175,10 @@ endif
 
 if REQUIRE_AESLIB
 OTHER_SRC += aeslib.c aeslib.h
+endif
+
+if REQUIRE_AESX660
+OTHER_SRC += drivers/aesx660.c drivers/aesx660.h
 endif
 
 libfprint_la_SOURCES =	\

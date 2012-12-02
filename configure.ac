@@ -23,7 +23,7 @@ AC_SUBST(lt_major)
 AC_SUBST(lt_revision)
 AC_SUBST(lt_age)
 
-all_drivers="upeke2 upekts upektc upeksonly vcom5s uru4000 fdu2000 aes1610 aes2501 aes2550 aes4000 vfs101 vfs301 etes603"
+all_drivers="upeke2 upekts upektc upeksonly vcom5s uru4000 fdu2000 aes1610 aes1660 aes2501 aes2550 aes2660 aes4000 vfs101 vfs301 etes603"
 
 require_imaging='no'
 require_aeslib='no'
@@ -35,8 +35,10 @@ enable_vcom5s='no'
 enable_uru4000='no'
 enable_fdu2000='no'
 enable_aes1610='no'
+enable_aes1660='no'
 enable_aes2501='no'
 enable_aes2550='no'
+enable_aes2660='no'
 enable_aes4000='no'
 enable_vfs101='no'
 enable_vfs301='no'
@@ -93,6 +95,18 @@ for driver in `echo ${drivers} | sed -e 's/,/ /g' -e 's/,$//g'`; do
 			require_aeslib="yes"
 			enable_aes1610="yes"
 		;;
+		aes1660)
+			AC_DEFINE([ENABLE_AES1660], [], [Build AuthenTec AES1660 driver])
+			require_aeslib="yes"
+			require_aesX660="yes"
+			enable_aes1660="yes"
+		;;
+		aes2660)
+			AC_DEFINE([ENABLE_AES2660], [], [Build AuthenTec AES1660 driver])
+			require_aeslib="yes"
+			require_aesX660="yes"
+			enable_aes2660="yes"
+		;;
 		aes4000)
 			AC_DEFINE([ENABLE_AES4000], [], [Build AuthenTec AES4000 driver])
 			require_aeslib="yes"
@@ -122,10 +136,13 @@ AM_CONDITIONAL([ENABLE_VCOM5S], [test "$enable_vcom5s" = "yes"])
 AM_CONDITIONAL([ENABLE_URU4000], [test "$enable_uru4000" = "yes"])
 AM_CONDITIONAL([ENABLE_FDU2000], [test "$enable_fdu2000" = "yes"])
 AM_CONDITIONAL([ENABLE_AES1610], [test "$enable_aes1610" = "yes"])
+AM_CONDITIONAL([ENABLE_AES1660], [test "$enable_aes1660" = "yes"])
 AM_CONDITIONAL([ENABLE_AES2501], [test "$enable_aes2501" = "yes"])
 AM_CONDITIONAL([ENABLE_AES2550], [test "$enable_aes2550" = "yes"])
+AM_CONDITIONAL([ENABLE_AES2660], [test "$enable_aes2660" = "yes"])
 AM_CONDITIONAL([ENABLE_AES4000], [test "$enable_aes4000" = "yes"])
 AM_CONDITIONAL([REQUIRE_AESLIB], [test "$require_aeslib" = "yes"])
+AM_CONDITIONAL([REQUIRE_AESX660], [test "$require_aesX660" = "yes"])
 AM_CONDITIONAL([ENABLE_VFS101], [test "$enable_vfs101" = "yes"])
 AM_CONDITIONAL([ENABLE_VFS301], [test "$enable_vfs301" = "yes"])
 AM_CONDITIONAL([ENABLE_ETES603], [test "$enable_etes603" = "yes"])
@@ -301,6 +318,11 @@ if test x$enable_aes1610 != xno ; then
 else
 	AC_MSG_NOTICE([   aes1610 driver disabled])
 fi
+if test x$enable_aes1660 != xno ; then
+	AC_MSG_NOTICE([** aes1660 driver enabled])
+else
+	AC_MSG_NOTICE([   aes1660 driver disabled])
+fi
 if test x$enable_aes2501 != xno ; then
 	AC_MSG_NOTICE([** aes2501 driver enabled])
 else
@@ -310,6 +332,11 @@ if test x$enable_aes2550 != xno ; then
 	AC_MSG_NOTICE([** aes2550/aes2810 driver enabled])
 else
 	AC_MSG_NOTICE([   aes2550/aes2810 driver disabled])
+fi
+if test x$enable_aes2660 != xno ; then
+	AC_MSG_NOTICE([** aes2660 driver enabled])
+else
+	AC_MSG_NOTICE([   aes2660 driver disabled])
 fi
 if test x$enable_aes4000 != xno ; then
 	AC_MSG_NOTICE([** aes4000 driver enabled])
@@ -335,6 +362,11 @@ if test x$require_aeslib != xno ; then
 	AC_MSG_NOTICE([** aeslib helper functions enabled])
 else
 	AC_MSG_NOTICE([   aeslib helper functions disabled])
+fi
+if test x$require_aesX660 != xno ; then
+	AC_MSG_NOTICE([** aesX660 common routines enabled])
+else
+	AC_MSG_NOTICE([   aesX660 common routines disabled])
 fi
 
 AC_CONFIG_FILES([libfprint.pc] [Makefile] [libfprint/Makefile] [examples/Makefile] [doc/Makefile])
