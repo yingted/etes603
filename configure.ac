@@ -1,5 +1,5 @@
-AC_INIT([libfprint], [0.4.0])
-AM_INIT_AUTOMAKE([1.11 dist-bzip2 no-dist-gzip check-news])
+AC_INIT([libfprint], [0.5.0])
+AM_INIT_AUTOMAKE([1.11 no-dist-gzip dist-xz check-news])
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_SRCDIR([libfprint/core.c])
 AM_CONFIG_HEADER([config.h])
@@ -50,7 +50,7 @@ AC_ARG_WITH([drivers],[AS_HELP_STRING([--with-drivers],
 	[drivers="$withval"],
 	[drivers="$all_drivers"])
 
-if test x$drivers = xall ; then
+if test "x$drivers" = "xall" ; then
 	drivers=$all_drivers
 fi
 
