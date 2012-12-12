@@ -33,16 +33,12 @@
  *
  */
 
-#include <stdio.h>
-#include <unistd.h>
 #include <string.h>
-#include <stdarg.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <errno.h>
 #include <assert.h>
-#include <sys/time.h>
 #include <libusb.h>
+#include <glib.h>
 
 #define FP_COMPONENT "etes603"
 #include <fp_internal.h>
