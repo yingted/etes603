@@ -29,7 +29,7 @@
  * Extra features not present in this driver (ask the author for code)
  *   Tuning of DTVRT for contact detection
  *   Contact detection via capacitance
- *   Capture mode using assembled frames
+ *   Capture mode using assembled frames (usually better quality)
  *
  */
 
@@ -544,6 +544,14 @@ static void process_remove_fp_end(struct etes603_dev *dev)
 	fp_dbg("Removing %d empty lines from image", i - 2);
 }
 
+static void reset_param(struct etes603_dev *dev)
+{
+	dev->dcoffset = 0;
+	dev->vrt = 0;
+	dev->vrb = 0;
+	dev->gain = 0;
+}
+
 
 /* Asynchronous stuff */
 
@@ -586,8 +594,8 @@ enum {
 	TUNEVRB_GET_DCOFFSET_ANS,
 	TUNEVRB_SET_DCOFFSET_REQ,
 	TUNEVRB_SET_DCOFFSET_ANS,
-	TUNEVRB_GET_FRAME_REQ,
-	TUNEVRB_GET_FRAME_ANS,
+	TUNEVRB_FRAME_REQ,
+	TUNEVRB_FRAME_ANS,
 	TUNEVRB_FINAL_SET_DCOFFSET_REQ,
 	TUNEVRB_FINAL_SET_DCOFFSET_ANS,
 	TUNEVRB_FINAL_SET_REG2627_REQ,
@@ -746,18 +754,6 @@ static void m_exit_start(struct fp_img_dev *idev)
 	fpi_ssm_start(ssm, m_exit_complete);
 }
 
-static void dev_deactivate(struct fp_img_dev *idev)
-{
-	struct etes603_dev *dev = idev->priv;
-
-	/* this can be called even if still activated. */
-	if (dev->is_active == TRUE) {
-		dev->is_active = FALSE;
-	} else {
-		m_exit_start(idev);
-	}
-}
-
 static void m_capture_state(struct fpi_ssm *ssm)
 {
 	struct fp_img_dev *idev = ssm->priv;
@@ -851,7 +847,7 @@ static void m_capture_complete(struct fpi_ssm *ssm)
 		if (idev->action_state != IMG_ACQUIRE_STATE_DEACTIVATING) {
 			fp_err("Error while capturing fingerprint "
 				"(ssm->error=%d)", ssm->error);
-			fpi_imgdev_session_error(idev, -EIO);
+			fpi_imgdev_session_error(idev, -5);
 		}
 	}
 	dev->is_active = FALSE;
@@ -970,38 +966,12 @@ static void m_finger_complete(struct fpi_ssm *ssm)
 		if (idev->action_state != IMG_ACQUIRE_STATE_DEACTIVATING) {
 			fp_err("Error while capturing fingerprint "
 				"(ssm->error=%d)", ssm->error);
-			fpi_imgdev_session_error(idev, -EIO);
+			fpi_imgdev_session_error(idev, -4);
 		}
 		dev->is_active = FALSE;
 	}
 
 	fpi_ssm_free(ssm);
-}
-
-static int dev_activate(struct fp_img_dev *idev, enum fp_imgdev_state state)
-{
-	struct etes603_dev *dev = idev->priv;
-	struct fpi_ssm *ssm;
-
-	assert(dev);
-
-	if (state != IMGDEV_STATE_AWAIT_FINGER_ON) {
-		fp_err("The driver is in an unexpected state: %d.", state);
-		fpi_imgdev_activate_complete(idev, 1);
-		return -1;
-	}
-
-	/* Reset info and data */
-	dev->is_active = TRUE;
-
-	/* Nothing to do to activate the device. */
-	fpi_imgdev_activate_complete(idev, 0);
-
-	ssm = fpi_ssm_new(idev->dev, m_finger_state, FGR_NUM_STATES);
-	ssm->priv = idev;
-	fpi_ssm_start(ssm, m_finger_complete);
-	
-	return 0;
 }
 
 /*
@@ -1023,7 +993,6 @@ static void m_tunevrb_state(struct fpi_ssm *ssm)
 		fp_dbg("Tuning of VRT/VRB");
 		assert(dev->dcoffset);
 		/* VRT(reg E1)=0x0A and VRB(reg E2)=0x10 are starting values */
-		/* reg_e0 = 0x23 is sensor normal/small gain */
 		dev->vrt = 0x0A;
 		dev->vrb = 0x10;
 		fpi_ssm_next_state(ssm);
@@ -1059,43 +1028,49 @@ static void m_tunevrb_state(struct fpi_ssm *ssm)
 			goto err;
 		fpi_ssm_next_state(ssm);
 		break;
-	case TUNEVRB_GET_FRAME_REQ:
+	case TUNEVRB_FRAME_REQ:
 		fp_dbg("Testing VRT=0x%02X VRB=0x%02X", dev->vrt, dev->vrb);
 		msg_get_frame(dev, 0x01, dev->gain, dev->vrt, dev->vrb);
 		if (async_tx(idev, EP_OUT, async_tx_cb, ssm))
 			goto err;
 		break;
-	case TUNEVRB_GET_FRAME_ANS:
+	case TUNEVRB_FRAME_ANS:
 		process_hist((uint8_t *)dev->ans, FRAME_SIZE, hist);
 		/* Note that this tuning could probably be improved */
 		if (hist[0] + hist[1] > 0.95) {
-			fp_dbg("Image is too dark, decreasing DCOffset");
-			dev->gain--;
-			fpi_ssm_jump_to_state(ssm, TUNEVRB_INIT);
+			if (dev->vrt <= 0 || dev->vrb <= 0) {
+				fp_dbg("Image is too dark, reducing DCOffset");
+				dev->dcoffset--;
+				fpi_ssm_jump_to_state(ssm, TUNEVRB_INIT);
+			} else {
+				dev->vrt--;
+				dev->vrb--;
+				fpi_ssm_jump_to_state(ssm, TUNEVRB_FRAME_REQ);
+			}
 			break;
 		}
-		if (hist[15] > 0.95) {
+		if (hist[4] > 0.95) {
 			fp_dbg("Image is too bright, increasing DCOffset");
-			dev->gain++;
+			dev->dcoffset++;
 			fpi_ssm_jump_to_state(ssm, TUNEVRB_INIT);
-		}
-		if ((hist[1]> 0.1) && (hist[3] > 0.1)
-		    && (hist[1] + hist[3] > 0.4)) {
-			fpi_ssm_next_state(ssm);
 			break;
 		}
-		if (dev->vrt >= 2 * dev->vrb - 0x0a) {
-			dev->vrt++; dev->vrb++;
-		} else {
-			dev->vrt++;
+		if (hist[4] < 0.3) {
+			if (dev->vrt >= 2 * dev->vrb - 0x0a) {
+				dev->vrt++; dev->vrb++;
+			} else {
+				dev->vrt++;
+			}
+			/* Check maximum for vrt/vrb */
+			/* TODO if maximum is reached, leave with an error? */
+			if (dev->vrt > VRT_MAX)
+				dev->vrt = VRT_MAX;
+			if (dev->vrb > VRB_MAX)
+				dev->vrb = VRB_MAX;
+			fpi_ssm_jump_to_state(ssm, TUNEVRB_FRAME_REQ);
+			break;
 		}
-		/* Check maximum for vrt/vrb */
-		/* TODO if maximum is reached, leave with an error? */
-		if (dev->vrt > VRT_MAX)
-			dev->vrt = VRT_MAX;
-		if (dev->vrb > VRB_MAX)
-			dev->vrb = VRB_MAX;
-		fpi_ssm_jump_to_state(ssm, TUNEVRB_GET_FRAME_REQ);
+		fpi_ssm_next_state(ssm);
 		break;
 	case TUNEVRB_FINAL_SET_DCOFFSET_REQ:
 		fp_dbg("-> VRT=0x%02X VRB=0x%02X", dev->vrt, dev->vrb);
@@ -1157,13 +1132,21 @@ err:
 static void m_tunevrb_complete(struct fpi_ssm *ssm)
 {
 	struct fp_img_dev *idev = ssm->priv;
-	struct etes603_dev *dev = idev->priv;
 
-	dev->is_active = FALSE;
-	if (ssm->error) {
-		fp_err("Error tuning VRT");
+	fpi_imgdev_activate_complete(idev, ssm->error != 0);
+	if (!ssm->error) {
+		fp_dbg("Tuning is done. Starting finger detection.");
+		struct fpi_ssm *ssmf;
+		ssmf = fpi_ssm_new(idev->dev, m_finger_state, FGR_NUM_STATES);
+		ssmf->priv = idev;
+		fpi_ssm_start(ssmf, m_finger_complete);
+	} else {
+		struct etes603_dev *dev = idev->priv;
+		fp_err("Error while tuning VRT");
+		dev->is_active = FALSE;
+		reset_param(dev);
+		fpi_imgdev_session_error(idev, -3);
 	}
-	fpi_imgdev_open_complete(idev, ssm->error != 0);
 	fpi_ssm_free(ssm);
 }
 
@@ -1187,6 +1170,7 @@ static void m_tunedc_state(struct fpi_ssm *ssm)
 	 * this case we decrease the gain. */
 	switch (ssm->cur_state) {
 	case TUNEDC_INIT:
+		/* reg_e0 = 0x23 is sensor normal/small gain */
 		dev->gain = GAIN_SMALL_INIT;
 		dev->tunedc_min = DCOFFSET_MIN;
 		dev->tunedc_max = DCOFFSET_MAX;
@@ -1284,9 +1268,10 @@ static void m_tunedc_complete(struct fpi_ssm *ssm)
 		fpi_ssm_start(ssm_tune, m_tunevrb_complete);
 	} else {
 		struct etes603_dev *dev = idev->priv;
-		dev->is_active = FALSE;
 		fp_err("Error while tuning DCOFFSET");
-		fpi_imgdev_open_complete(idev, 1);
+		dev->is_active = FALSE;
+		reset_param(dev);
+		fpi_imgdev_session_error(idev, -2);
 	}
 	fpi_ssm_free(ssm);
 }
@@ -1403,24 +1388,65 @@ static void m_init_complete(struct fpi_ssm *ssm)
 		fpi_ssm_start(ssm_tune, m_tunedc_complete);
 	} else {
 		struct etes603_dev *dev = idev->priv;
-		dev->is_active = FALSE;
 		fp_err("Error initializing the device");
-		fpi_imgdev_open_complete(idev, 1);
+		dev->is_active = FALSE;
+		reset_param(dev);
+		fpi_imgdev_session_error(idev, -1);
 	}
 	fpi_ssm_free(ssm);
 }
 
+static int dev_activate(struct fp_img_dev *idev, enum fp_imgdev_state state)
+{
+	struct etes603_dev *dev = idev->priv;
+	struct fpi_ssm *ssm;
 
-/*
- * Device initialization.
- */
+	assert(dev);
+
+	if (state != IMGDEV_STATE_AWAIT_FINGER_ON) {
+		fp_err("The driver is in an unexpected state: %d.", state);
+		fpi_imgdev_activate_complete(idev, 1);
+		return -1;
+	}
+
+	/* Reset info and data */
+	dev->is_active = TRUE;
+
+	if (dev->dcoffset == 0) {
+		fp_dbg("Tuning device...");
+		ssm = fpi_ssm_new(idev->dev, m_init_state, INIT_NUM_STATES);
+		ssm->priv = idev;
+		fpi_ssm_start(ssm, m_init_complete);
+	} else {
+		fp_dbg("Using previous tuning (DCOFFSET=0x%02X,VRT=0x%02X,"
+			"VRB=0x%02X,GAIN=0x%02X).", dev->dcoffset, dev->vrt,
+			dev->vrb, dev->gain);
+		fpi_imgdev_activate_complete(idev, 0);
+		ssm = fpi_ssm_new(idev->dev, m_finger_state, FGR_NUM_STATES);
+		ssm->priv = idev;
+		fpi_ssm_start(ssm, m_finger_complete);
+	}
+	return 0;
+}
+
+static void dev_deactivate(struct fp_img_dev *idev)
+{
+	struct etes603_dev *dev = idev->priv;
+
+	/* this can be called even if still activated. */
+	if (dev->is_active == TRUE) {
+		dev->is_active = FALSE;
+	} else {
+		m_exit_start(idev);
+	}
+}
+
 static int dev_open(struct fp_img_dev *idev, unsigned long driver_data)
 {
 	int ret;
 	struct etes603_dev *dev;
-	struct fpi_ssm *ssm;
 
-	dev = g_malloc(sizeof(struct etes603_dev));
+	dev = g_malloc0(sizeof(struct etes603_dev));
 	idev->priv = dev;
 
 	dev->req = g_malloc(sizeof(struct egis_msg));
@@ -1434,62 +1460,19 @@ static int dev_open(struct fp_img_dev *idev, unsigned long driver_data)
 		return ret;
 	}
 
-	/* Mark as active state until we reach the end of init sequence */
-	dev->is_active = TRUE;
-
-	ssm = fpi_ssm_new(idev->dev, m_init_state, INIT_NUM_STATES);
-	ssm->priv = idev;
-	fpi_ssm_start(ssm, m_init_complete);
-
+	fpi_imgdev_open_complete(idev, 0);
 	return 0;
 }
 
-/*
- * Device deinitialization.
- */
 static void dev_close(struct fp_img_dev *idev)
 {
-	/* SSM with asynchronous transfer cannot be used here.
-	 * Deadlock in fpi_imgdev_close_complete()
-	 * libusb:do_close() usbi_mutex_lock(&ctx->open_devs_lock);*/
-	int ret, actual_length;
 	struct etes603_dev *dev = idev->priv;
 
-	/* Values from a captured frame */
-	/* FIXME checks again the turn off */
-	msg_set_regs(dev, 24, REG_DCOFFSET, 0x31, REG_GAIN, 0x23,
-		REG_DTVRT, 0x0D, REG_51, 0x30, REG_VCO_CONTROL, REG_VCO_IDLE,
-		REG_F0, 0x01, REG_F2, 0x4E, REG_50, 0x8F, REG_59, 0x18, 
-		REG_5A, 0x08, REG_5B, 0x10, REG_MODE_CONTROL, REG_MODE_CONTACT);
-	ret = libusb_bulk_transfer(idev->udev, EP_OUT,
-				   (unsigned char *)dev->req, dev->req_len,
-				   &actual_length, BULK_TIMEOUT);
-
-	if (ret < 0) {
-		fp_err("Turning off the device fails with error %s (%d)",
-			libusb_error_name(ret), ret);
-		goto err;
-	}
-	ret = libusb_bulk_transfer(idev->udev, EP_IN,
-				   (unsigned char *)dev->ans, dev->ans_len,
-				   &actual_length, BULK_TIMEOUT);
-	if (ret < 0) {
-		fp_err("Turning off the device fails with error %s (%d)",
-			libusb_error_name(ret), ret);
-		goto err;
-	}
-	if (msg_check_ok(dev)) {
-		fp_err("Cannot turn off the device.");
-		goto err;
-	}
-
-err:
 	g_free(dev->req);
 	g_free(dev->ans);
 	g_free(dev->fp);
 	g_free(dev);
 
-	/* Even if there is an error, close device. */
 	libusb_release_interface(idev->udev, 0);
 	fpi_imgdev_close_complete(idev);
 }
