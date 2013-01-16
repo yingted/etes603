@@ -1055,7 +1055,7 @@ static void m_tunevrb_state(struct fpi_ssm *ssm)
 			fpi_ssm_jump_to_state(ssm, TUNEVRB_INIT);
 			break;
 		}
-		if (hist[4] < 0.3) {
+		if (hist[4] + hist[3] > 0.4) {
 			if (dev->vrt >= 2 * dev->vrb - 0x0a) {
 				dev->vrt++; dev->vrb++;
 			} else {
