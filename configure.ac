@@ -2,7 +2,7 @@ AC_INIT([libfprint], [0.5.0])
 AM_INIT_AUTOMAKE([1.11 no-dist-gzip dist-xz check-news])
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_SRCDIR([libfprint/core.c])
-AM_CONFIG_HEADER([config.h])
+AC_CONFIG_HEADERS([config.h])
 
 # Enable silent build when available (Automake 1.11)
 m4_ifdef([AM_SILENT_RULES],[AM_SILENT_RULES([yes])])
@@ -178,6 +178,10 @@ AC_ARG_ENABLE(udev-rules,
 	esac],
 	[ENABLE_UDEV_RULES=yes]) dnl Default value
 AM_CONDITIONAL(ENABLE_UDEV_RULES, test x$ENABLE_UDEV_RULES = "xyes")
+
+if test $ENABLE_UDEV_RULES = no && test -d .git/ ; then
+	AC_MSG_ERROR(--disable-udev-rules can only be used when building from tarballs)
+fi
 
 AC_ARG_WITH(udev-rules-dir,
 	    AS_HELP_STRING([--with-udev-rules-dir=DIR],[Installation path for udev rules @<:@auto@:>@]),
