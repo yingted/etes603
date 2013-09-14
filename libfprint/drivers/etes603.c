@@ -49,7 +49,7 @@
 #define EP_OUT             0x02
 /* Note that 1000 ms is usually enough but with CMD_READ_FE could be longer
  * since the sensor is waiting motion. */
-#define BULK_TIMEOUT       1000
+#define BULK_TIMEOUT       5000
 
 /* es603 defines */
 #define FRAME_WIDTH        192  /* pixels per row */
@@ -212,6 +212,8 @@ struct etes603_dev {
 	uint8_t vrb;
 
 	unsigned int is_active;
+
+	struct timespec timeout;
 };
 
 /*
@@ -925,20 +927,29 @@ static void m_finger_state(struct fpi_ssm *ssm)
 	case FGR_FPA_INIT_SET_MODE_SENSOR_ANS:
 		if (msg_check_ok(dev))
 			goto err;
+		msg_get_frame(dev, 0x00, 0x00, 0x00, 0x00);
+		clock_gettime(CLOCK_MONOTONIC_RAW, &dev->timeout);
+		dev->timeout.tv_nsec += BULK_TIMEOUT%1000*1000000L;
+		dev->timeout.tv_sec += BULK_TIMEOUT/1000 + dev->timeout.tv_nsec/1000000000L;
+		dev->timeout.tv_nsec %= 1000000000L;
 		fpi_ssm_next_state(ssm);
 		break;
 	case FGR_FPA_GET_FRAME_REQ:
-		msg_get_frame(dev, 0x00, 0x00, 0x00, 0x00);
 		if (async_tx(idev, EP_OUT, async_tx_cb, ssm))
 			goto err;
 		break;
 	case FGR_FPA_GET_FRAME_ANS:
 		if (process_frame_empty((uint8_t *)dev->ans, FRAME_SIZE)) {
-			fpi_ssm_jump_to_state(ssm, FGR_FPA_GET_FRAME_REQ);
-		} else {
+			struct timespec now;
+			clock_gettime(CLOCK_MONOTONIC_RAW, &now);
+			if(now.tv_sec < dev->timeout.tv_sec || (now.tv_sec == dev->timeout.tv_sec && now.tv_nsec < dev->timeout.tv_nsec)) {
+				fpi_ssm_jump_to_state(ssm, FGR_FPA_GET_FRAME_REQ);
+				break;
+			}
+			fpi_imgdev_report_finger_status(idev, FALSE);
+		} else
 			fpi_imgdev_report_finger_status(idev, TRUE);
-			fpi_ssm_mark_completed(ssm);
-		}
+		fpi_ssm_mark_completed(ssm);
 		break;
 	default:
 		fp_err("Unknown state %d", ssm->cur_state);
